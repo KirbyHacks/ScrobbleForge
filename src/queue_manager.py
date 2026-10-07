@@ -75,6 +75,7 @@ class QueueManager:
             saved_perm_raw = self.tracker.get_state("queue_permutation") if self.tracker else None
             saved_source_hash = self.tracker.get_state("queue_source_hash") if self.tracker else None
 
+            # restore saved permutation if source hash matches
             if saved_perm_raw and saved_source_hash == current_source_hash:
                 try:
                     saved_perm = json.loads(saved_perm_raw)
@@ -94,11 +95,9 @@ class QueueManager:
                         if len(reconstructed) == len(self.original_tracks):
                             self.queue = reconstructed
                             restored = True
-                            logger.info(
-                                f"Restored persisted shuffle permutation ({len(self.queue)} tracks)."
-                            )
+                            logger.info(f"[QUEUE] restored shuffle permutation ({len(self.queue)} tracks)")
                 except Exception as e:
-                    logger.warning(f"Failed to restore saved shuffle permutation: {e}")
+                    logger.warning(f"[QUEUE] failed to restore saved shuffle permutation: {e}")
 
             if not restored:
                 self.queue = list(self.original_tracks)
@@ -107,27 +106,29 @@ class QueueManager:
                 self.current_index = 0
                 if self.tracker:
                     self.tracker.set_state("queue_index", "0")
-                logger.info(f"Generated fresh shuffle permutation with {len(self.queue)} tracks.")
+                logger.info(f"[QUEUE] generated fresh shuffle permutation ({len(self.queue)} tracks)")
                 return
         else:
             self.queue = list(self.original_tracks)
             self._clear_permutation()
 
-        # Attempt to restore previous index from state DB
+        # restore previous playback index from state db
         saved_index = self.tracker.get_state("queue_index") if self.tracker else None
         if saved_index is not None:
             try:
                 idx = int(saved_index)
                 if 0 <= idx < len(self.queue):
                     self.current_index = idx
-                    logger.info(f"Resumed playback queue from track {idx + 1} of {len(self.queue)}")
+                    logger.info(f"[QUEUE] resumed playback from track {idx + 1} of {len(self.queue)}")
                 elif idx >= len(self.queue):
                     if self.loop:
-                        logger.info("Previous run completed playlist. Repeating from start...")
                         self.current_index = 0
                         if self.shuffle:
                             random.shuffle(self.queue)
                             self._save_permutation()
+                            logger.info(f"[LOOP] playlist queue wrapped -> reshuffled {len(self.queue)} tracks")
+                        else:
+                            logger.info(f"[LOOP] playlist queue wrapped -> repeating {len(self.queue)} tracks")
                         if self.tracker:
                             self.tracker.set_state("queue_index", "0")
                     else:
@@ -140,31 +141,28 @@ class QueueManager:
             self.current_index = 0
 
     def update_tracks(self, new_tracks: List[Track]):
-        """Updates the track pool when playlists are refreshed."""
         if not new_tracks:
             return
 
-        logger.info(f"Updating track queue with {len(new_tracks)} fresh tracks from source.")
+        logger.info(f"[QUEUE] updated track queue with {len(new_tracks)} fresh tracks")
         self.original_tracks = list(new_tracks)
         self._setup_queue()
 
     def get_next_track(self) -> Optional[Track]:
-        """
-        Retrieves the next track to scrobble and advances the cursor.
-        Returns None if queue is exhausted and loop is False.
-        """
         if not self.queue:
             return None
 
         if self.current_index >= len(self.queue):
             if self.loop:
-                logger.info("Reached end of playlist queue. Repeating...")
                 self.current_index = 0
                 if self.shuffle:
                     random.shuffle(self.queue)
                     self._save_permutation()
+                    logger.info(f"[LOOP] playlist queue wrapped -> reshuffled {len(self.queue)} tracks")
+                else:
+                    logger.info(f"[LOOP] playlist queue wrapped -> repeating {len(self.queue)} tracks")
             else:
-                logger.info("Finished entire playlist queue. Loop is disabled.")
+                logger.info(f"[QUEUE COMPLETE] finished {len(self.queue)} tracks -> loop disabled")
                 return None
 
         track = self.queue[self.current_index]

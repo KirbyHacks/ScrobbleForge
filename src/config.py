@@ -143,14 +143,14 @@ class AppConfig:
             else:
                 load_dotenv()
 
-        # System settings
+        # system settings
         data_dir = Path(os.getenv("DATA_DIR", "./data")).resolve()
         system_cfg = SystemConfig(
             data_dir=data_dir,
             log_level=os.getenv("LOG_LEVEL", "INFO").strip().upper(),
         )
 
-        # Last.fm credentials
+        # last.fm credentials
         session_key = os.getenv("LASTFM_SESSION_KEY", "").strip() or None
         if not session_key:
             session_file = data_dir / "session.key"
@@ -170,7 +170,7 @@ class AppConfig:
             password=os.getenv("LASTFM_PASSWORD", "").strip() or None,
         )
 
-        # Spotify configuration (supports playlist, album, and track URLs)
+        # spotify configuration
         raw_sources = os.getenv("SPOTIFY_TRACK_URL") or os.getenv("SPOTIFY_PLAYLIST_URL") or os.getenv("SPOTIFY_URL", "")
         sources = [s.strip() for s in raw_sources.split(",") if s.strip()]
         refresh_hours = _parse_float(
@@ -186,7 +186,7 @@ class AppConfig:
             refresh_interval_hours=refresh_hours,
         )
 
-        # Engine settings validation
+        # engine settings validation
         raw_mode = os.getenv("SCROBBLE_MODE")
         if raw_mode is None or not raw_mode.strip():
             mode = "realistic"

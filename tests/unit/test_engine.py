@@ -1,8 +1,11 @@
+import sqlite3
 import sys
 from pathlib import Path
 import tempfile
+import threading
 import time
 import unittest
+from unittest.mock import MagicMock, patch
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 if str(PROJECT_ROOT) not in sys.path:
@@ -12,12 +15,14 @@ from tests.unit._dependency_guard import ensure_dependencies_mocked
 
 ensure_dependencies_mocked()
 
+import requests
 from src.models import Track
 from src.quota_tracker import QuotaTracker
 from src.queue_manager import QueueManager
-from src.engine import ScrobblerEngine
+from src.engine import ScrobblerEngine, is_transient_error
+from src.lastfm_client import LastFMClient, LastFMTemporaryError, LastFMRateLimitError, LastFMAuthError
+from src.spotify_client import SpotifyIngestionError
 from src.config import AppConfig, LastFMConfig, SpotifyConfig, EngineConfig, SystemConfig
-import threading
 
 
 class MockLastFM:
@@ -118,9 +123,6 @@ class TestScrobblerEngine(unittest.TestCase):
 
     def test_lastfm_client_scrobble_and_now_playing_enforces_30s_clamp(self):
         """Verifies that LastFMClient passes max(30, duration_sec) to Last.fm network calls."""
-        from src.lastfm_client import LastFMClient
-        from unittest.mock import MagicMock
-
         client = LastFMClient.__new__(LastFMClient)
         client.network = MagicMock()
 
@@ -163,6 +165,130 @@ class TestScrobblerEngine(unittest.TestCase):
             track_number=1,
             duration=200,  # Authentic 200s!
         )
+
+    @patch("threading.Event.wait", return_value=False)
+    def test_transient_error_triggers_retry_and_resets_on_success(self, mock_wait):
+        """Verifies that transient errors increment error count and retry without skipping track."""
+        cfg = AppConfig(
+            lastfm=LastFMConfig(api_key="k", api_secret="s", username="u"),
+            spotify=SpotifyConfig(),
+            engine=EngineConfig(mode="custom_interval", custom_interval_seconds=0),
+            system=SystemConfig(data_dir=Path(self.temp_dir.name)),
+        )
+        track = Track(title="Retry Song", artist="Retry Artist", duration_ms=180000)
+        qm = QueueManager(tracks=[track], tracker=self.tracker, shuffle=False, loop=False)
+        stop_event = threading.Event()
+
+        mock_lfm = MagicMock()
+        # Fail once with transient error, then succeed
+        mock_lfm.scrobble.side_effect = [LastFMTemporaryError("Temporary 503"), True]
+
+        engine = ScrobblerEngine(
+            config=cfg,
+            lastfm=mock_lfm,
+            spotify=None,
+            queue=qm,
+            tracker=self.tracker,
+            stop_event=stop_event,
+        )
+
+        engine.run()
+
+        self.assertEqual(mock_lfm.scrobble.call_count, 2)
+        self.assertEqual(engine.consecutive_errors, 0)
+        self.assertFalse(engine.circuit_broken)
+        self.assertIsNone(engine.pending_track)
+
+    def test_deterministic_bugs_halt_immediately(self):
+        """Verifies that KeyError and AttributeError are raised and stop the loop immediately."""
+        cfg = AppConfig(
+            lastfm=LastFMConfig(api_key="k", api_secret="s", username="u"),
+            spotify=SpotifyConfig(),
+            engine=EngineConfig(mode="custom_interval", custom_interval_seconds=0),
+            system=SystemConfig(data_dir=Path(self.temp_dir.name)),
+        )
+        stop_event = threading.Event()
+
+        # Test KeyError
+        track_key = Track(title="Bug Song", artist="Bug Artist", duration_ms=180000)
+        qm_key = QueueManager(tracks=[track_key], tracker=None, shuffle=False, loop=False)
+        mock_lfm_key = MagicMock()
+        mock_lfm_key.scrobble.side_effect = KeyError("missing_key_in_logic")
+        engine_key = ScrobblerEngine(
+            config=cfg,
+            lastfm=mock_lfm_key,
+            spotify=None,
+            queue=qm_key,
+            tracker=self.tracker,
+            stop_event=stop_event,
+        )
+        with self.assertRaises(KeyError):
+            engine_key.run()
+
+        # Test AttributeError
+        track_attr = Track(title="Bug Song 2", artist="Bug Artist 2", duration_ms=180000)
+        qm_attr = QueueManager(tracks=[track_attr], tracker=None, shuffle=False, loop=False)
+        mock_lfm_attr = MagicMock()
+        mock_lfm_attr.scrobble.side_effect = AttributeError("NoneType has no attribute 'name'")
+        engine_attr = ScrobblerEngine(
+            config=cfg,
+            lastfm=mock_lfm_attr,
+            spotify=None,
+            queue=qm_attr,
+            tracker=self.tracker,
+            stop_event=stop_event,
+        )
+        with self.assertRaises(AttributeError):
+            engine_attr.run()
+
+    @patch("threading.Event.wait", return_value=False)
+    def test_circuit_breaker_trips_after_threshold_consecutive_failures(self, mock_wait):
+        """Verifies that the circuit breaker trips after threshold consecutive transient failures."""
+        cfg = AppConfig(
+            lastfm=LastFMConfig(api_key="k", api_secret="s", username="u"),
+            spotify=SpotifyConfig(),
+            engine=EngineConfig(mode="custom_interval", custom_interval_seconds=0),
+            system=SystemConfig(data_dir=Path(self.temp_dir.name)),
+        )
+        track = Track(title="CB Song", artist="CB Artist", duration_ms=180000)
+        qm = QueueManager(tracks=[track], tracker=self.tracker, shuffle=False, loop=True)
+        stop_event = threading.Event()
+
+        mock_lfm = MagicMock()
+        mock_lfm.scrobble.side_effect = LastFMTemporaryError("Service Unavailable 503")
+
+        engine = ScrobblerEngine(
+            config=cfg,
+            lastfm=mock_lfm,
+            spotify=None,
+            queue=qm,
+            tracker=self.tracker,
+            stop_event=stop_event,
+            circuit_breaker_threshold=5,
+        )
+
+        engine.run()
+
+        self.assertTrue(engine.circuit_broken)
+        self.assertEqual(engine.consecutive_errors, 5)
+        self.assertEqual(mock_lfm.scrobble.call_count, 5)
+
+    def test_transient_error_classification(self):
+        """Verifies is_transient_error classifies transient vs deterministic logic bugs."""
+        self.assertTrue(is_transient_error(LastFMTemporaryError("503")))
+        self.assertTrue(is_transient_error(LastFMRateLimitError("rate limited")))
+        self.assertTrue(is_transient_error(requests.RequestException("connection drop")))
+        self.assertTrue(is_transient_error(sqlite3.OperationalError("database is locked")))
+        self.assertTrue(is_transient_error(SpotifyIngestionError("network issue")))
+        self.assertTrue(is_transient_error(ConnectionError("socket dropped")))
+        self.assertTrue(is_transient_error(TimeoutError("timed out")))
+
+        # Deterministic bugs must be False
+        self.assertFalse(is_transient_error(KeyError("missing_field")))
+        self.assertFalse(is_transient_error(AttributeError("no attribute")))
+        self.assertFalse(is_transient_error(TypeError("bad type")))
+        self.assertFalse(is_transient_error(ZeroDivisionError("zero division")))
+        self.assertFalse(is_transient_error(ValueError("bad value")))
 
 
 if __name__ == "__main__":

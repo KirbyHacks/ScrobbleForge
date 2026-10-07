@@ -1,20 +1,50 @@
 import logging
 import random
+import sqlite3
 import threading
 import time
 from typing import Optional
+import requests
+
+try:
+    import pylast
+except ImportError:
+    pylast = None
+
 from .config import AppConfig
-from .lastfm_client import LastFMClient, LastFMAuthError, LastFMRateLimitError, LastFMTemporaryError
+from .lastfm_client import (
+    LastFMAuthError,
+    LastFMRateLimitError,
+    LastFMTemporaryError,
+    LastFMClient,
+)
 from .models import Track
 from .queue_manager import QueueManager
 from .quota_tracker import QuotaTracker
-from .spotify_client import SpotifyClient
+from .spotify_client import SpotifyClient, SpotifyIngestionError
 
 logger = logging.getLogger("scrobbler.engine")
 
 
+def is_transient_error(exc: Exception) -> bool:
+    """Identifies transient network or infrastructure errors eligible for backoff and retry."""
+    if isinstance(exc, (LastFMTemporaryError, LastFMRateLimitError, requests.RequestException, sqlite3.OperationalError, SpotifyIngestionError, ConnectionError, TimeoutError)):
+        return True
+    if pylast is not None:
+        if isinstance(exc, (pylast.NetworkError, pylast.MalformedResponseError)):
+            return True
+        if isinstance(exc, pylast.WSError):
+            status = str(getattr(exc, "status", ""))
+            details = str(getattr(exc, "details", "")).lower()
+            if status in ("11", "16", "26", "29") or any(
+                term in details for term in ("offline", "temporarily unavailable", "rate limit", "busy", "service")
+            ):
+                return True
+    return False
+
+
 class ScrobblerEngine:
-    """Core scrobbler coordinating playback timing, pacing modes, and quota limits."""
+    """Coordinates playback timing, pacing modes, and quota limits."""
 
     def __init__(
         self,
@@ -24,6 +54,7 @@ class ScrobblerEngine:
         queue: QueueManager,
         tracker: QuotaTracker,
         stop_event: threading.Event,
+        circuit_breaker_threshold: int = 5,
     ):
         self.cfg = config
         self.lastfm = lastfm
@@ -34,12 +65,14 @@ class ScrobblerEngine:
 
         self.last_refresh_time = time.time()
         self.consecutive_errors = 0
+        self.circuit_breaker_threshold = max(1, circuit_breaker_threshold)
+        self.circuit_broken = False
+        self.pending_track: Optional[Track] = None
 
         self.virtual_timeline_cursor: Optional[int] = None
         self._init_virtual_timeline()
 
     def _init_virtual_timeline(self):
-        """Initializes virtual timeline cursor for non-overlapping max_limit backdating."""
         saved_cursor = self.tracker.get_state("virtual_timeline_cursor")
         now = int(time.time())
         if saved_cursor is not None:
@@ -48,23 +81,18 @@ class ScrobblerEngine:
                 two_weeks_ago = now - (13 * 86400)
                 if two_weeks_ago < cur < (now - 60):
                     self.virtual_timeline_cursor = cur
-                    logger.info(f"Resumed max_limit timeline cursor at timestamp {cur}")
+                    logger.info(f"[TIMELINE] resumed max_limit cursor at timestamp {cur}")
                     return
             except ValueError:
                 pass
 
-        # Start timeline 3 days ago to maintain non-overlapping sequential history
+        # start timeline 3 days ago to keep non-overlapping sequential history
         self.virtual_timeline_cursor = now - (3 * 86400)
         self.tracker.set_state("virtual_timeline_cursor", str(self.virtual_timeline_cursor))
 
     def run(self):
-        """Main scrobble loop."""
         mode = self.cfg.engine.mode
-        logger.info("=" * 60)
-        logger.info(f" Mode: [{mode.upper()}] | Tracks: {self.queue.total_tracks}")
-        logger.info(f" Shuffle: {self.cfg.engine.shuffle} | Loop: {self.cfg.engine.loop}")
-        logger.info(f" Daily Safety Quota: {self.cfg.engine.max_daily_scrobbles} scrobbles / 24h")
-        logger.info("=" * 60)
+        logger.info(f"[INIT] mode: {mode} | tracks: {self.queue.total_tracks} | quota: {self.cfg.engine.max_daily_scrobbles:,}/24h | loop: {self.cfg.engine.loop}")
 
         while not self.stop_event.is_set():
             try:
@@ -74,10 +102,14 @@ class ScrobblerEngine:
                 if self.stop_event.is_set():
                     break
 
-                track = self.queue.get_next_track()
-                if track is None:
-                    logger.info("Playlist queue completed.")
-                    break
+                if self.pending_track is None:
+                    track = self.queue.get_next_track()
+                    if track is None:
+                        logger.info("[QUEUE COMPLETE] playlist queue completed")
+                        break
+                    self.pending_track = track
+                else:
+                    track = self.pending_track
 
                 if mode == "realistic":
                     self._execute_realistic_step(track)
@@ -88,59 +120,68 @@ class ScrobblerEngine:
                 else:
                     self._execute_realistic_step(track)
 
+                self.pending_track = None
                 self.consecutive_errors = 0
 
-            except LastFMRateLimitError as e:
-                logger.warning(f"Rate limited by Last.fm: {e}. Sleeping 90s...")
-                if self.stop_event.wait(timeout=90):
-                    break
-
-            except LastFMTemporaryError as e:
-                self.consecutive_errors += 1
-                backoff = min(300, 5 * (2 ** min(self.consecutive_errors, 6)))
-                logger.warning(f"Last.fm service issue: {e}. Backing off {backoff}s...")
-                if self.stop_event.wait(timeout=backoff):
-                    break
-
             except LastFMAuthError as e:
-                logger.error(f"Fatal Last.fm authentication error: {e}")
+                logger.error(f"[AUTH ERROR] fatal last.fm authentication error: {e}")
                 break
 
             except Exception as e:
-                logger.exception(f"Unexpected error: {e}")
-                if self.stop_event.wait(timeout=10):
+                if not is_transient_error(e):
+                    logger.error(f"[FATAL BUG] non-transient error encountered: {type(e).__name__}: {e}")
+                    raise
+
+                self.consecutive_errors += 1
+                if self.consecutive_errors >= self.circuit_breaker_threshold:
+                    self.circuit_broken = True
+                    logger.critical(
+                        f"[CIRCUIT BREAKER] {self.consecutive_errors} consecutive transient failures reached threshold ({self.circuit_breaker_threshold}) -> halting engine: {e}"
+                    )
                     break
 
-        logger.info("Scrobbler engine stopped cleanly.")
+                if isinstance(e, LastFMRateLimitError):
+                    logger.warning(
+                        f"[RATE LIMITED] last.fm rate limit: {e} -> sleeping 90s (failure {self.consecutive_errors}/{self.circuit_breaker_threshold})"
+                    )
+                    if self.stop_event.wait(timeout=90):
+                        break
+                else:
+                    backoff = min(300, 5 * (2 ** min(self.consecutive_errors, 6)))
+                    logger.warning(
+                        f"[TRANSIENT ERROR] {type(e).__name__}: {e} -> backing off {backoff}s (failure {self.consecutive_errors}/{self.circuit_breaker_threshold})"
+                    )
+                    if self.stop_event.wait(timeout=backoff):
+                        break
+
+        logger.info("[STOP] scrobbler engine halted cleanly")
 
     def _check_and_enforce_daily_quota(self):
-        """Pauses execution if rolling 24-hour limit is reached."""
         allowed, wait_seconds = self.tracker.can_scrobble(
             max_daily_limit=self.cfg.engine.max_daily_scrobbles
         )
         if not allowed:
             mins, secs = divmod(wait_seconds, 60)
-            rolling_count = self.tracker.get_rolling_24h_count()
+            time_str = f"{mins}m {secs:02d}s" if mins > 0 else f"{secs}s"
             logger.info(
-                f"[QUOTA GUARD] Cap reached ({rolling_count}/{self.cfg.engine.max_daily_scrobbles}). "
-                f"Pausing for {mins}m {secs:02d}s until rolling window clears..."
+                f"[THROTTLED] quota guard engaged -> sleeping {time_str} until oldest scrobble ages out"
             )
             self.stop_event.wait(timeout=wait_seconds)
 
     def _execute_realistic_step(self, track: Track):
-        """Simulates real-time human listening and scrobbles at half duration."""
         track_start_time = int(time.time())
         duration_sec = track.duration_sec
+        # last.fm requires minimum 30s duration
         scrobble_duration = max(30, duration_sec)
 
         if self.cfg.engine.update_now_playing:
             self.lastfm.update_now_playing(track)
 
-        # Scrobble threshold: min(50% of track, 240s), enforcing Last.fm platform minimum 30s
+        # scrobble at min(50%, 240s) with 30s platform floor
         scrobble_threshold = max(30, min(scrobble_duration // 2, 240))
         remaining_duration = max(0, duration_sec - scrobble_threshold)
 
-        logger.info(f"[NOW PLAYING] {track.display_name} [{track.formatted_duration}] (Scrobbling in {scrobble_threshold}s)")
+        logger.info(f"[NOW PLAYING] {track.display_name} ({track.formatted_duration}) -> scrobble at 50%")
 
         if self.stop_event.wait(timeout=scrobble_threshold):
             return
@@ -149,9 +190,7 @@ class ScrobblerEngine:
         self.tracker.record_scrobble(track.artist, track.title, timestamp=track_start_time)
         rolling_count = self.tracker.get_rolling_24h_count()
         logger.info(
-            f"[SCROBBLED] {track.display_name} | "
-            f"Daily: {rolling_count}/{self.cfg.engine.max_daily_scrobbles} | "
-            f"Total: {self.tracker.get_total_scrobbles()}"
+            f"[SCROBBLED] {track.display_name} [ok] | 24h: {rolling_count:,}/{self.cfg.engine.max_daily_scrobbles:,}"
         )
 
         if remaining_duration > 0:
@@ -165,14 +204,15 @@ class ScrobblerEngine:
         self.stop_event.wait(timeout=jitter)
 
     def _execute_max_limit_step(self, track: Track):
-        """Paces at ~32s with sequential non-overlapping timeline backdating."""
         now = int(time.time())
 
+        # sequential non-overlapping timeline backdating
         if self.virtual_timeline_cursor is None or self.virtual_timeline_cursor >= (now - 60):
             self.virtual_timeline_cursor = now - 86400
 
         track_timestamp = self.virtual_timeline_cursor
         duration_sec = track.duration_sec
+        # last.fm requires minimum 30s duration
         scrobble_duration = max(30, duration_sec)
 
         self.lastfm.scrobble(track, timestamp=track_timestamp)
@@ -183,38 +223,32 @@ class ScrobblerEngine:
 
         rolling_count = self.tracker.get_rolling_24h_count()
         logger.info(
-            f"[MAX_LIMIT SCROBBLE] {track.display_name} [{track.formatted_duration}] | "
-            f"Daily: {rolling_count}/{self.cfg.engine.max_daily_scrobbles} | "
-            f"Total: {self.tracker.get_total_scrobbles()}"
+            f"[SCROBBLED] {track.display_name} [ok] | 24h: {rolling_count:,}/{self.cfg.engine.max_daily_scrobbles:,}"
         )
 
         pace_delay = random.uniform(31.5, 33.0)
         self.stop_event.wait(timeout=pace_delay)
 
     def _execute_custom_interval_step(self, track: Track):
-        """Scrobbles with a user-defined fixed interval."""
         now = int(time.time())
         self.lastfm.scrobble(track, timestamp=now)
         self.tracker.record_scrobble(track.artist, track.title, timestamp=now)
 
         rolling_count = self.tracker.get_rolling_24h_count()
         logger.info(
-            f"[CUSTOM SCROBBLE] {track.display_name} | "
-            f"Daily: {rolling_count}/{self.cfg.engine.max_daily_scrobbles} | "
-            f"Total: {self.tracker.get_total_scrobbles()}"
+            f"[SCROBBLED] {track.display_name} [ok] | 24h: {rolling_count:,}/{self.cfg.engine.max_daily_scrobbles:,}"
         )
 
         self.stop_event.wait(timeout=self.cfg.engine.custom_interval_seconds)
 
     def _check_periodic_refresh(self):
-        """Refreshes source playlists at configured hour intervals."""
         if not self.spotify or not self.cfg.spotify.sources:
             return
 
         interval_sec = self.cfg.spotify.refresh_interval_hours * 3600
         now = time.time()
         if (now - self.last_refresh_time) >= interval_sec:
-            logger.info("Executing scheduled refresh of Spotify sources...")
+            logger.info("[REFRESH] refreshing spotify sources...")
             try:
                 fresh_tracks = self.spotify.fetch_sources(
                     self.cfg.spotify.sources,
@@ -223,5 +257,5 @@ class ScrobblerEngine:
                 if fresh_tracks:
                     self.queue.update_tracks(fresh_tracks)
                 self.last_refresh_time = now
-            except Exception as e:
-                logger.warning(f"Periodic playlist refresh failed: {e}")
+            except (SpotifyIngestionError, requests.RequestException) as e:
+                logger.warning(f"[REFRESH] periodic playlist refresh failed: {e}")

@@ -4,7 +4,7 @@ import logging
 import re
 import time
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Union
 import requests
 from .models import Track
 
@@ -36,6 +36,329 @@ class SpotifyIngestionError(Exception):
     pass
 
 
+class SpotifyEmbedParser:
+    """Stateless parser for extracting tracks from Spotify public embed HTML/JSON payloads."""
+
+    @staticmethod
+    def extract_artist(
+        raw_artists: Any = None,
+        subtitle: str = "",
+        fallback: str = "Unknown Artist",
+    ) -> str:
+        """Extracts and normalizes primary artist from artists array, dict, string, or subtitle."""
+        if raw_artists:
+            if isinstance(raw_artists, list) and len(raw_artists) > 0:
+                first = raw_artists[0]
+                if isinstance(first, dict):
+                    name = (first.get("name") or "").strip()
+                    if name:
+                        return name
+                elif isinstance(first, str) and first.strip():
+                    return first.strip()
+            elif isinstance(raw_artists, dict):
+                name = (raw_artists.get("name") or "").strip()
+                if name:
+                    return name
+            elif isinstance(raw_artists, str) and raw_artists.strip():
+                return raw_artists.strip()
+
+        if subtitle and subtitle.strip():
+            extracted = extract_primary_artist(subtitle)
+            if extracted and extracted != "Unknown Artist":
+                return extracted
+
+        return fallback
+
+    @staticmethod
+    def normalize_duration(val: Any, default: int = 180000) -> int:
+        """Normalizes duration in milliseconds with fallback for missing or non-positive values."""
+        if val is None:
+            return default
+        try:
+            val_int = int(val)
+            return val_int if val_int > 0 else default
+        except (ValueError, TypeError):
+            return default
+
+    @staticmethod
+    def extract_spotify_id(uri: Optional[str] = None, explicit_id: Optional[str] = None) -> Optional[str]:
+        """Extracts Spotify ID from URI or explicit ID."""
+        if uri and ":" in uri:
+            return uri.split(":")[-1]
+        if uri and "/" in uri:
+            return uri.split("/")[-1].split("?")[0]
+        if explicit_id:
+            return explicit_id.split("?")[0].strip()
+        if uri:
+            return uri.split("?")[0].strip()
+        return None
+
+    @classmethod
+    def _extract_json(cls, content: str) -> dict:
+        """Extracts Next.js payload JSON from HTML markup or raw JSON string."""
+        if not content or not content.strip():
+            raise SpotifyIngestionError("No metadata found on Spotify embed page (empty content)")
+
+        trimmed = content.strip()
+        # direct json string check
+        if trimmed.startswith("{") and trimmed.endswith("}"):
+            try:
+                return json.loads(trimmed)
+            except Exception:
+                pass
+
+        # next.js script tag match
+        match = re.search(
+            r'<script id="__NEXT_DATA__"[^>]*>(.*?)</script>',
+            trimmed,
+            re.DOTALL,
+        )
+        if match:
+            try:
+                return json.loads(match.group(1))
+            except Exception as e:
+                raise SpotifyIngestionError(f"Failed to parse embed JSON: {e}") from e
+
+        # retry direct json parse if content starts with brace
+        if trimmed.startswith("{"):
+            try:
+                return json.loads(trimmed)
+            except Exception as e:
+                raise SpotifyIngestionError(f"Failed to parse embed JSON: {e}") from e
+
+        raise SpotifyIngestionError("No metadata found on Spotify embed page")
+
+    @classmethod
+    def _extract_entity(cls, payload: dict) -> dict:
+        """Navigates Next.js data paths to locate the Spotify entity."""
+        if not isinstance(payload, dict):
+            return {}
+
+        # standard next.js hydration path: props.pageProps.state.data.entity
+        entity = (
+            payload.get("props", {})
+            .get("pageProps", {})
+            .get("state", {})
+            .get("data", {})
+            .get("entity")
+        )
+        if isinstance(entity, dict):
+            return entity
+
+        # alternate next.js paths
+        for path in [
+            ("props", "pageProps", "entity"),
+            ("props", "pageProps", "data", "entity"),
+            ("data", "entity"),
+            ("entity",),
+        ]:
+            curr = payload
+            for key in path:
+                if isinstance(curr, dict):
+                    curr = curr.get(key)
+                else:
+                    curr = None
+                    break
+            if isinstance(curr, dict):
+                return curr
+
+        # Direct entity payload check
+        if any(k in payload for k in ("trackList", "tracks", "title", "name", "uri")):
+            return payload
+
+        return {}
+
+    @classmethod
+    def _infer_entity_type(cls, entity: dict) -> str:
+        """Infers entity type ('track', 'album', 'playlist') from entity metadata."""
+        etype = (entity.get("type") or "").lower().strip()
+        if etype in ("track", "album", "playlist"):
+            return etype
+
+        uri = entity.get("uri", "")
+        if "spotify:track:" in uri:
+            return "track"
+        if "spotify:album:" in uri:
+            return "album"
+        if "spotify:playlist:" in uri:
+            return "playlist"
+
+        if "album_type" in entity or entity.get("album"):
+            return "album"
+
+        if "trackList" in entity or "tracks" in entity:
+            return "playlist"
+
+        if "duration" in entity or "duration_ms" in entity or "isrc" in entity:
+            return "track"
+
+        return "playlist"
+
+    @classmethod
+    def _extract_raw_tracks(cls, entity: dict) -> list:
+        """Extracts track items list from embed entity or nested structures."""
+        if "trackList" in entity and isinstance(entity["trackList"], list):
+            return entity["trackList"]
+
+        tracks_val = entity.get("tracks")
+        if isinstance(tracks_val, list):
+            return tracks_val
+        elif isinstance(tracks_val, dict):
+            items = tracks_val.get("items")
+            if isinstance(items, list):
+                return items
+
+        items = entity.get("items")
+        if isinstance(items, list):
+            return items
+
+        return []
+
+    @classmethod
+    def _parse_track(cls, entity: dict, default_id: Optional[str] = None) -> List[Track]:
+        """Parses single track entity into a List[Track]."""
+        title = (entity.get("title") or entity.get("name") or "Unknown Track").strip()
+        primary_artist = cls.extract_artist(entity.get("artists"), entity.get("subtitle", ""))
+
+        album_name = ""
+        album_obj = entity.get("album")
+        if isinstance(album_obj, dict):
+            album_name = (album_obj.get("name") or album_obj.get("title") or "").strip()
+        elif isinstance(album_obj, str):
+            album_name = album_obj.strip()
+
+        album_artist = ""
+        if isinstance(album_obj, dict):
+            album_artist = cls.extract_artist(album_obj.get("artists"), album_obj.get("subtitle", ""), fallback="")
+        if not album_artist:
+            album_artist = entity.get("album_artist") or entity.get("albumArtist") or primary_artist
+
+        duration_ms = cls.normalize_duration(entity.get("duration") or entity.get("duration_ms"))
+        spotify_id = cls.extract_spotify_id(entity.get("uri"), default_id or entity.get("id"))
+        track_number = int(entity.get("track_number") or entity.get("trackNumber") or 1)
+
+        track = Track(
+            title=title,
+            artist=primary_artist,
+            album=album_name,
+            album_artist=album_artist,
+            duration_ms=duration_ms,
+            track_number=track_number,
+            spotify_id=spotify_id,
+            source_name="Single Track",
+        )
+        logger.info(f"Loaded single track: {track.display_name} [{track.formatted_duration}]")
+        return [track]
+
+    @classmethod
+    def _parse_album(cls, entity: dict, default_id: Optional[str] = None) -> List[Track]:
+        """Parses album entity and track list into a List[Track]."""
+        album_name = (entity.get("name") or entity.get("title") or f"Album ({default_id or 'unknown'})").strip()
+        album_artist = cls.extract_artist(entity.get("artists"), entity.get("subtitle", ""), fallback="")
+
+        raw_tracks = cls._extract_raw_tracks(entity)
+        tracks: List[Track] = []
+        for idx, item in enumerate(raw_tracks, start=1):
+            if isinstance(item, dict) and "track" in item and isinstance(item["track"], dict):
+                item = item["track"]
+            if not isinstance(item, dict):
+                continue
+
+            title = (item.get("title") or item.get("name") or "").strip()
+            if not title:
+                continue
+
+            primary_artist = cls.extract_artist(item.get("artists"), item.get("subtitle", ""))
+            item_album_artist = item.get("album_artist") or item.get("albumArtist") or album_artist or primary_artist
+            duration_ms = cls.normalize_duration(item.get("duration") or item.get("duration_ms"))
+            spotify_id = cls.extract_spotify_id(item.get("uri"), item.get("id"))
+            track_number = int(item.get("track_number") or item.get("trackNumber") or idx)
+
+            tracks.append(Track(
+                title=title,
+                artist=primary_artist,
+                album=album_name,
+                album_artist=item_album_artist,
+                duration_ms=duration_ms,
+                track_number=track_number,
+                spotify_id=spotify_id,
+                source_name=album_name,
+            ))
+
+        logger.info(f"Loaded {len(tracks)} tracks from album '{album_name}'")
+        return tracks
+
+    @classmethod
+    def _parse_playlist(cls, entity: dict, default_id: Optional[str] = None) -> List[Track]:
+        """Parses playlist entity and track list into a List[Track]."""
+        playlist_name = (entity.get("name") or entity.get("title") or f"Playlist ({default_id or 'unknown'})").strip()
+        raw_tracks = cls._extract_raw_tracks(entity)
+
+        tracks: List[Track] = []
+        for idx, item in enumerate(raw_tracks, start=1):
+            if isinstance(item, dict) and "track" in item and isinstance(item["track"], dict):
+                item = item["track"]
+            if not isinstance(item, dict):
+                continue
+
+            title = (item.get("title") or item.get("name") or "").strip()
+            if not title:
+                continue
+
+            primary_artist = cls.extract_artist(item.get("artists"), item.get("subtitle", ""))
+
+            album_name = ""
+            album_obj = item.get("album")
+            if isinstance(album_obj, dict):
+                album_name = (album_obj.get("name") or album_obj.get("title") or "").strip()
+            elif isinstance(album_obj, str):
+                album_name = album_obj.strip()
+
+            album_artist = item.get("album_artist") or item.get("albumArtist") or primary_artist
+            duration_ms = cls.normalize_duration(item.get("duration") or item.get("duration_ms"))
+            spotify_id = cls.extract_spotify_id(item.get("uri"), item.get("id"))
+            track_number = int(item.get("track_number") or item.get("trackNumber") or idx)
+
+            tracks.append(Track(
+                title=title,
+                artist=primary_artist,
+                album=album_name,
+                album_artist=album_artist,
+                duration_ms=duration_ms,
+                track_number=track_number,
+                spotify_id=spotify_id,
+                source_name=playlist_name,
+            ))
+
+        logger.info(f"Loaded {len(tracks)} tracks from playlist '{playlist_name}'")
+        return tracks
+
+    @classmethod
+    def parse(
+        cls,
+        content: str,
+        entity_type: Optional[str] = None,
+        default_id: Optional[str] = None,
+    ) -> List[Track]:
+        """Parses raw HTML or JSON string from Spotify embed into standardized Track models."""
+        payload = cls._extract_json(content)
+        entity = cls._extract_entity(payload)
+
+        if not entity:
+            return []
+
+        resolved_type = (entity_type or "").lower().strip()
+        if not resolved_type:
+            resolved_type = cls._infer_entity_type(entity)
+
+        if resolved_type == "track":
+            return cls._parse_track(entity, default_id=default_id)
+        elif resolved_type == "album":
+            return cls._parse_album(entity, default_id=default_id)
+        else:
+            return cls._parse_playlist(entity, default_id=default_id)
+
+
 class SpotifyClient:
     """Resolves Spotify playlists, albums, and tracks into standardized Track models."""
 
@@ -44,6 +367,7 @@ class SpotifyClient:
         client_id: Optional[str] = None,
         client_secret: Optional[str] = None,
         cache_path: Optional[Path] = None,
+        retries: int = 1,
     ):
         if client_id and "your_" in client_id.lower():
             client_id = None
@@ -53,6 +377,7 @@ class SpotifyClient:
         self.client_id = client_id
         self.client_secret = client_secret
         self.cache_path = Path(cache_path) if cache_path else None
+        self.retries = max(1, retries)
         self._access_token: Optional[str] = None
         self._token_expires: float = 0
 
@@ -132,81 +457,26 @@ class SpotifyClient:
         url = f"https://open.spotify.com/embed/{item_type}/{item_id}"
         headers = {"User-Agent": _USER_AGENT, "Accept-Language": "en-US,en;q=0.9"}
 
-        try:
-            response = requests.get(url, headers=headers, timeout=15)
-            response.raise_for_status()
-        except Exception as e:
-            raise SpotifyIngestionError(f"Failed to access Spotify embed ({url}): {e}") from e
+        last_error = None
+        response = None
+        for attempt in range(self.retries):
+            try:
+                response = requests.get(url, headers=headers, timeout=15)
+                response.raise_for_status()
+                break
+            except Exception as e:
+                last_error = e
+                if attempt + 1 < self.retries:
+                    time.sleep(0.5)
 
-        match = re.search(r'<script id="__NEXT_DATA__" type="application/json">(.*?)</script>', response.text)
-        if not match:
-            raise SpotifyIngestionError(f"No metadata found on Spotify embed page ({url})")
+        if response is None:
+            raise SpotifyIngestionError(f"Failed to access Spotify embed ({url}): {last_error}") from last_error
 
-        try:
-            payload = json.loads(match.group(1))
-            entity = payload.get("props", {}).get("pageProps", {}).get("state", {}).get("data", {}).get("entity", {})
-        except Exception as e:
-            raise SpotifyIngestionError(f"Failed to parse embed JSON: {e}") from e
-
-        # Handle single track source
-        if item_type == "track":
-            title = (entity.get("title") or entity.get("name") or "Unknown Track").strip()
-            artists = entity.get("artists", [])
-            if artists and isinstance(artists, list):
-                primary_artist = artists[0].get("name", "Unknown Artist").strip()
-            else:
-                primary_artist = extract_primary_artist(entity.get("subtitle", ""))
-
-            duration_ms = entity.get("duration", 180000)
-            uri = entity.get("uri", "")
-            spotify_id = uri.split(":")[-1] if uri else item_id
-
-            track = Track(
-                title=title,
-                artist=primary_artist,
-                album="",
-                album_artist=primary_artist,
-                duration_ms=duration_ms,
-                track_number=1,
-                spotify_id=spotify_id,
-                source_name="Single Track",
-            )
-            logger.info(f"Loaded single track: {track.display_name} [{track.formatted_duration}]")
-            return [track]
-
-        container_name = entity.get("name") or entity.get("title") or f"{item_type.capitalize()} ({item_id})"
-        raw_tracks = entity.get("trackList", [])
-
-        tracks: List[Track] = []
-        for idx, item in enumerate(raw_tracks, start=1):
-            title = item.get("title", "").strip()
-            if not title:
-                continue
-
-            artists = item.get("artists")
-            if artists and isinstance(artists, list) and len(artists) > 0:
-                first = artists[0]
-                primary_artist = (first.get("name") if isinstance(first, dict) else str(first)).strip() or "Unknown Artist"
-            else:
-                primary_artist = extract_primary_artist(item.get("subtitle", ""))
-            duration_ms = item.get("duration", 180000)
-            uri = item.get("uri", "")
-            spotify_id = uri.split(":")[-1] if uri else None
-            album_name = container_name if item_type == "album" else ""
-
-            tracks.append(Track(
-                title=title,
-                artist=primary_artist,
-                album=album_name,
-                album_artist=primary_artist,
-                duration_ms=duration_ms,
-                track_number=idx,
-                spotify_id=spotify_id,
-                source_name=container_name,
-            ))
-
-        logger.info(f"Loaded {len(tracks)} tracks from {item_type} '{container_name}'")
-        return tracks
+        return SpotifyEmbedParser.parse(
+            response.text,
+            entity_type=item_type,
+            default_id=item_id,
+        )
 
     def fetch_sources(self, sources: List[str], use_cache_if_available: bool = True) -> List[Track]:
         """Resolves tracks from all configured sources with cache fallback."""

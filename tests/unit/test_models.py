@@ -10,14 +10,19 @@ from src.models import Track
 
 
 class TestTrackModel(unittest.TestCase):
-    def test_duration_minimum_enforcement(self):
-        # Last.fm requires tracks >= 30s
+    def test_authentic_duration_preservation(self):
+        # Domain model preserves authentic track duration without platform clamping
         short_track = Track(title="Short", artist="Artist", duration_ms=15000)
-        self.assertEqual(short_track.duration_sec, 30)
+        self.assertEqual(short_track.duration_sec, 15)
+        self.assertEqual(short_track.formatted_duration, "0m 15s")
 
         normal_track = Track(title="Normal", artist="Artist", duration_ms=215000)
         self.assertEqual(normal_track.duration_sec, 215)
         self.assertEqual(normal_track.formatted_duration, "3m 35s")
+
+        sub_second_track = Track(title="Tiny", artist="Artist", duration_ms=800)
+        self.assertEqual(sub_second_track.duration_sec, 0)
+        self.assertEqual(sub_second_track.formatted_duration, "0m 00s")
 
     def test_serialization(self):
         track = Track(

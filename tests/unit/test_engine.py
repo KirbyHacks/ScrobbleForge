@@ -75,7 +75,8 @@ class TestScrobblerEngine(unittest.TestCase):
         track1 = qm.get_next_track()
         ts1 = engine.virtual_timeline_cursor
         engine.lastfm.scrobble(track1, timestamp=ts1)
-        engine.virtual_timeline_cursor += track1.duration_sec + 2
+        scrobble_duration = max(30, track1.duration_sec)
+        engine.virtual_timeline_cursor += scrobble_duration + 2
 
         # Check that track2 start time is exactly after track1 finished!
         ts2 = engine.virtual_timeline_cursor
@@ -83,6 +84,85 @@ class TestScrobblerEngine(unittest.TestCase):
 
         # Non-overlapping verification: ts2 > ts1 + track1 duration
         self.assertGreater(ts2, ts1 + track1.duration_sec)
+
+    def test_max_limit_timeline_advancement_enforces_30s_minimum_for_short_tracks(self):
+        """Verifies that short tracks (<30s) advance virtual timeline by at least 30s + 2s padding."""
+        cfg = AppConfig(
+            lastfm=LastFMConfig(api_key="k", api_secret="s", username="u"),
+            spotify=SpotifyConfig(),
+            engine=EngineConfig(mode="max_limit", max_daily_scrobbles=2750),
+            system=SystemConfig(data_dir=Path(self.temp_dir.name)),
+        )
+        short_track = Track(title="Interlude", artist="Artist", duration_ms=12000)  # 12 seconds authentic
+        qm = QueueManager(tracks=[short_track], tracker=self.tracker, shuffle=False, loop=False)
+        stop_event = threading.Event()
+        stop_event.set()  # Avoid real-time pacing delay during unit test execution
+
+        engine = ScrobblerEngine(
+            config=cfg,
+            lastfm=self.mock_lfm,
+            spotify=None,
+            queue=qm,
+            tracker=self.tracker,
+            stop_event=stop_event,
+        )
+
+        initial_cursor = engine.virtual_timeline_cursor
+        # Execute max limit step directly
+        engine._execute_max_limit_step(short_track)
+
+        # Scrobble duration constraint is max(30, 12) = 30s
+        # Timeline must advance by 30 + 2 = 32s, NOT 12 + 2 = 14s
+        expected_cursor = initial_cursor + 30 + 2
+        self.assertEqual(engine.virtual_timeline_cursor, expected_cursor)
+
+    def test_lastfm_client_scrobble_and_now_playing_enforces_30s_clamp(self):
+        """Verifies that LastFMClient passes max(30, duration_sec) to Last.fm network calls."""
+        from src.lastfm_client import LastFMClient
+        from unittest.mock import MagicMock
+
+        client = LastFMClient.__new__(LastFMClient)
+        client.network = MagicMock()
+
+        # Short track: 10s authentic
+        short_track = Track(title="Intro", artist="Artist", duration_ms=10000)
+        self.assertEqual(short_track.duration_sec, 10)
+
+        client.scrobble(short_track, timestamp=1700000000)
+        client.network.scrobble.assert_called_with(
+            artist="Artist",
+            title="Intro",
+            timestamp=1700000000,
+            album=None,
+            album_artist=None,
+            track_number=1,
+            duration=30,  # Clamped to 30s platform rule!
+        )
+
+        client.update_now_playing(short_track)
+        client.network.update_now_playing.assert_called_with(
+            artist="Artist",
+            title="Intro",
+            album=None,
+            album_artist=None,
+            track_number=1,
+            duration=30,  # Clamped to 30s platform rule!
+        )
+
+        # Normal track: 200s authentic
+        normal_track = Track(title="Full Song", artist="Artist", duration_ms=200000)
+        self.assertEqual(normal_track.duration_sec, 200)
+
+        client.scrobble(normal_track, timestamp=1700000100)
+        client.network.scrobble.assert_called_with(
+            artist="Artist",
+            title="Full Song",
+            timestamp=1700000100,
+            album=None,
+            album_artist=None,
+            track_number=1,
+            duration=200,  # Authentic 200s!
+        )
 
 
 if __name__ == "__main__":

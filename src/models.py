@@ -15,9 +15,8 @@ class Track:
 
     @property
     def duration_sec(self) -> int:
-        """Returns track duration in seconds (enforcing minimum 30 seconds)."""
-        sec = int(self.duration_ms / 1000)
-        return max(30, sec)
+        """Returns authentic track duration in seconds."""
+        return int(self.duration_ms / 1000)
 
     @property
     def formatted_duration(self) -> str:

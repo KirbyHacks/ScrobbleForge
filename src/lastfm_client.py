@@ -152,6 +152,8 @@ class LastFMClient:
         if not self.network:
             return False
 
+        scrobble_duration = max(30, track.duration_sec)
+
         try:
             self.network.update_now_playing(
                 artist=track.artist,
@@ -159,7 +161,7 @@ class LastFMClient:
                 album=track.album if track.album else None,
                 album_artist=track.album_artist if track.album_artist else None,
                 track_number=track.track_number,
-                duration=track.duration_sec,
+                duration=scrobble_duration,
             )
             return True
         except Exception as e:
@@ -172,6 +174,7 @@ class LastFMClient:
             raise LastFMAuthError("Last.fm client is not authenticated.")
 
         ts = timestamp if timestamp is not None else int(time.time())
+        scrobble_duration = max(30, track.duration_sec)
 
         try:
             self.network.scrobble(
@@ -181,7 +184,7 @@ class LastFMClient:
                 album=track.album if track.album else None,
                 album_artist=track.album_artist if track.album_artist else None,
                 track_number=track.track_number,
-                duration=track.duration_sec,
+                duration=scrobble_duration,
             )
             return True
         except pylast.WSError as e:

@@ -131,12 +131,13 @@ class ScrobblerEngine:
         """Simulates real-time human listening and scrobbles at half duration."""
         track_start_time = int(time.time())
         duration_sec = track.duration_sec
+        scrobble_duration = max(30, duration_sec)
 
         if self.cfg.engine.update_now_playing:
             self.lastfm.update_now_playing(track)
 
-        # Scrobble threshold: min(50% of track, 240s), minimum 30s
-        scrobble_threshold = max(30, min(duration_sec // 2, 240))
+        # Scrobble threshold: min(50% of track, 240s), enforcing Last.fm platform minimum 30s
+        scrobble_threshold = max(30, min(scrobble_duration // 2, 240))
         remaining_duration = max(0, duration_sec - scrobble_threshold)
 
         logger.info(f"[NOW PLAYING] {track.display_name} [{track.formatted_duration}] (Scrobbling in {scrobble_threshold}s)")
@@ -172,11 +173,12 @@ class ScrobblerEngine:
 
         track_timestamp = self.virtual_timeline_cursor
         duration_sec = track.duration_sec
+        scrobble_duration = max(30, duration_sec)
 
         self.lastfm.scrobble(track, timestamp=track_timestamp)
         self.tracker.record_scrobble(track.artist, track.title, timestamp=now)
 
-        self.virtual_timeline_cursor += duration_sec + 2
+        self.virtual_timeline_cursor += scrobble_duration + 2
         self.tracker.set_state("virtual_timeline_cursor", str(self.virtual_timeline_cursor))
 
         rolling_count = self.tracker.get_rolling_24h_count()

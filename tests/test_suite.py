@@ -101,6 +101,39 @@ class TestSpotifyParsingAndCache(unittest.TestCase):
         self.assertEqual(tracks[0].artist, "Rick Astley")
         self.assertGreater(tracks[0].duration_ms, 200000)
 
+    def test_extract_primary_artist_matrix(self):
+        from src.spotify_client import extract_primary_artist
+
+        # Solo artists with internal commas
+        self.assertEqual(extract_primary_artist("Tyler, The Creator"), "Tyler, The Creator")
+
+        # Complex band names with multiple commas or ampersands
+        self.assertEqual(extract_primary_artist("Earth, Wind & Fire"), "Earth, Wind & Fire")
+        self.assertEqual(extract_primary_artist("Crosby, Stills, Nash & Young"), "Crosby, Stills, Nash & Young")
+
+        # Multi-artist delimited with non-breaking spaces (,\xa0 and ,\u00a0)
+        self.assertEqual(
+            extract_primary_artist("Tyler, The Creator,\xa0A$AP Rocky"),
+            "Tyler, The Creator",
+        )
+        self.assertEqual(
+            extract_primary_artist("Kendrick Lamar,\xa0SZA"),
+            "Kendrick Lamar",
+        )
+        self.assertEqual(
+            extract_primary_artist("Clipse,\u00a0Tyler, The Creator,\u00a0Pusha T"),
+            "Clipse",
+        )
+
+        # Punctuation and symbols
+        self.assertEqual(extract_primary_artist("AC/DC"), "AC/DC")
+        self.assertEqual(extract_primary_artist("Sunn O)))"), "Sunn O)))")
+        self.assertEqual(extract_primary_artist("Panic! At The Disco"), "Panic! At The Disco")
+
+        # Empty / fallback handling
+        self.assertEqual(extract_primary_artist(""), "Unknown Artist")
+        self.assertEqual(extract_primary_artist("   "), "Unknown Artist")
+
     def test_fallback_tracks_txt(self):
         with tempfile.NamedTemporaryFile("w+", delete=False, suffix=".txt") as f:
             f.write("# Sample Playlist\nRadiohead - Karma Police\nBlur - Song 2\n")
@@ -113,6 +146,29 @@ class TestSpotifyParsingAndCache(unittest.TestCase):
             self.assertEqual(tracks[0].title, "Karma Police")
             self.assertEqual(tracks[1].artist, "Blur")
             self.assertEqual(tracks[1].title, "Song 2")
+        finally:
+            f_path.unlink()
+
+    def test_fallback_tracks_csv_quoted_comma(self):
+        with tempfile.NamedTemporaryFile("w+", delete=False, suffix=".csv") as f:
+            f.write('Track Name,Artist Name(s),Duration (ms)\n')
+            f.write('"IGOR\'S THEME","Tyler, The Creator",200684\n')
+            f.write('"September","Earth, Wind & Fire",215000\n')
+            f.write('"Thunderstruck","AC/DC",292000\n')
+            f_path = Path(f.name)
+
+        try:
+            tracks = load_local_fallback_tracks(f_path)
+            self.assertEqual(len(tracks), 3)
+            self.assertEqual(tracks[0].artist, "Tyler, The Creator")
+            self.assertEqual(tracks[0].title, "IGOR'S THEME")
+            self.assertEqual(tracks[0].duration_ms, 200684)
+
+            self.assertEqual(tracks[1].artist, "Earth, Wind & Fire")
+            self.assertEqual(tracks[1].title, "September")
+
+            self.assertEqual(tracks[2].artist, "AC/DC")
+            self.assertEqual(tracks[2].title, "Thunderstruck")
         finally:
             f_path.unlink()
 

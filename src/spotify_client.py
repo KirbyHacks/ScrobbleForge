@@ -16,6 +16,20 @@ _USER_AGENT = (
     "Chrome/124.0.0.0 Safari/537.36"
 )
 
+def extract_primary_artist(raw_subtitle: str) -> str:
+    """Extracts primary artist, handling Spotify comma + non-breaking space delimiters."""
+    if not raw_subtitle or not raw_subtitle.strip():
+        return "Unknown Artist"
+
+    text = raw_subtitle.strip()
+    for sep in (",\xa0", ",\u00a0"):
+        if sep in text:
+            parts = text.split(sep, 1)
+            if parts[0].strip():
+                return parts[0].strip()
+
+    return text.replace("\xa0", " ").strip()
+
 
 class SpotifyIngestionError(Exception):
     """Raised when track resolution fails."""
@@ -141,8 +155,7 @@ class SpotifyClient:
             if artists and isinstance(artists, list):
                 primary_artist = artists[0].get("name", "Unknown Artist").strip()
             else:
-                subtitle = entity.get("subtitle", "").replace("\xa0", " ").strip()
-                primary_artist = subtitle.split(",")[0].strip() if subtitle else "Unknown Artist"
+                primary_artist = extract_primary_artist(entity.get("subtitle", ""))
 
             duration_ms = entity.get("duration", 180000)
             uri = entity.get("uri", "")
@@ -170,8 +183,12 @@ class SpotifyClient:
             if not title:
                 continue
 
-            subtitle = item.get("subtitle", "").replace("\xa0", " ").strip()
-            primary_artist = subtitle.split(",")[0].strip() if subtitle else "Unknown Artist"
+            artists = item.get("artists")
+            if artists and isinstance(artists, list) and len(artists) > 0:
+                first = artists[0]
+                primary_artist = (first.get("name") if isinstance(first, dict) else str(first)).strip() or "Unknown Artist"
+            else:
+                primary_artist = extract_primary_artist(item.get("subtitle", ""))
             duration_ms = item.get("duration", 180000)
             uri = item.get("uri", "")
             spotify_id = uri.split(":")[-1] if uri else None
@@ -258,7 +275,7 @@ def load_local_fallback_tracks(file_path: Path) -> List[Track]:
                         ms = int(duration_ms) if duration_ms and str(duration_ms).isdigit() else 180000
                         tracks.append(Track(
                             title=title.strip(),
-                            artist=artist.split(",")[0].strip(),
+                            artist=artist.strip(),
                             album=album.strip(),
                             duration_ms=ms,
                             source_name="Local CSV",

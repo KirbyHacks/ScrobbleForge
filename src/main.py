@@ -131,7 +131,6 @@ def main():
 
     logger.info("Initializing ScrobbleForge v1.0.0...")
 
-    # Setup signal handling & stop event early so auth polling or engine can be interrupted cleanly
     stop_event = threading.Event()
 
     def handle_shutdown_signal(signum, frame):
@@ -145,7 +144,6 @@ def main():
     signal.signal(signal.SIGINT, handle_shutdown_signal)
     signal.signal(signal.SIGTERM, handle_shutdown_signal)
 
-    # Validate essential Last.fm credentials
     if not config.lastfm.api_key or not config.lastfm.api_secret:
         logger.error(
             "Missing LASTFM_API_KEY or LASTFM_API_SECRET.\n"
@@ -153,7 +151,7 @@ def main():
         )
         sys.exit(1)
 
-    # Resolve session key (Strategy A: Zero-Restart auto web-auth)
+    # Web authorization handshake
     if not config.lastfm.session_key and not config.lastfm.password:
         logger.info("No LASTFM_SESSION_KEY found. Initiating one-time Last.fm web authorization...")
         try:
@@ -198,7 +196,6 @@ def main():
         if not config.lastfm.username:
             config.lastfm.username = username
 
-        # Persist session key to data/session.key
         config.system.data_dir.mkdir(parents=True, exist_ok=True)
         session_file = config.system.data_dir / "session.key"
         try:
@@ -207,11 +204,10 @@ def main():
                 os.chmod(session_file, 0o600)
             except Exception:
                 pass
-            logger.info(f"Persisted permanent session key to {session_file}")
+            logger.info(f"Persisted session key to {session_file}")
         except Exception as write_err:
             logger.warning(f"Could not persist session key to disk: {write_err}")
 
-        # Also attempt to save to .env if writable
         env_file = Path(".env")
         if env_file.is_file():
             try:
@@ -223,13 +219,11 @@ def main():
             except Exception:
                 pass
 
-    # Prepare data directory & quota tracker
     config.system.data_dir.mkdir(parents=True, exist_ok=True)
     db_path = config.system.data_dir / "state.db"
     tracker = QuotaTracker(db_path=db_path)
     tracker.prune_old_records(retention_days=14)
 
-    # Ingest tracks (Spotify Free/API or local fallback)
     tracks = []
     spotify_client = None
 

@@ -13,6 +13,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy source code and helper scripts
 COPY src/ /app/src/
 COPY auth_helper.py /app/
+COPY .env.example /app/
 
 # Create data directory and set permissions for non-root user (UID 1000)
 RUN mkdir -p /app/data && chown -R 1000:1000 /app
@@ -20,5 +21,6 @@ RUN mkdir -p /app/data && chown -R 1000:1000 /app
 # Run as non-privileged user to avoid permission escalation
 USER 1000:1000
 
-# Default command launches the scrobbler module
-CMD ["python", "-m", "src.main"]
+# Entrypoint launches the scrobbler module, supporting 'init', 'auth', or default run
+ENTRYPOINT ["python", "-m", "src.main"]
+CMD []

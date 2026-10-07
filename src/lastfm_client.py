@@ -1,6 +1,7 @@
 import logging
+import threading
 import time
-from typing import Optional
+from typing import Optional, Tuple
 import pylast
 from .models import Track
 
@@ -12,6 +13,16 @@ class LastFMAuthError(Exception):
     pass
 
 
+class LastFMAuthTimeoutError(LastFMAuthError):
+    """Raised when web authorization polling exceeds the hard timeout."""
+    pass
+
+
+class LastFMAuthCancelledError(LastFMAuthError):
+    """Raised when web authorization is cancelled via shutdown signal."""
+    pass
+
+
 class LastFMRateLimitError(Exception):
     """Raised when Last.fm rate limits requests (code 29)."""
     pass
@@ -20,6 +31,60 @@ class LastFMRateLimitError(Exception):
 class LastFMTemporaryError(Exception):
     """Raised on transient network or server errors."""
     pass
+
+
+def initiate_web_auth(api_key: str, api_secret: str) -> Tuple[pylast.SessionKeyGenerator, str]:
+    """Initializes a Last.fm Web Authentication session and returns (generator, auth_url)."""
+    network = pylast.LastFMNetwork(api_key=api_key.strip(), api_secret=api_secret.strip())
+    skg = pylast.SessionKeyGenerator(network)
+    auth_url = skg.get_web_auth_url()
+    return skg, auth_url
+
+
+def poll_web_auth(
+    skg: pylast.SessionKeyGenerator,
+    auth_url: str,
+    stop_event: threading.Event,
+    poll_interval: float = 6.0,
+    timeout_seconds: float = 900.0,
+) -> Tuple[str, str]:
+    """
+    Non-blocking poller for Last.fm web authorization.
+    Handles Last.fm Error 14 ('This token has not been authorized') until user approves in browser.
+    Respects stop_event for clean shutdown and enforces a hard timeout.
+    Returns (session_key, username).
+    """
+    start_time = time.time()
+    logger.info("Awaiting Last.fm browser approval...")
+
+    while not stop_event.is_set():
+        if time.time() - start_time >= timeout_seconds:
+            raise LastFMAuthTimeoutError(
+                f"Last.fm authorization timed out after {int(timeout_seconds / 60)} minutes without approval."
+            )
+
+        try:
+            session_key, username = skg.get_web_auth_session_key_username(auth_url)
+            if session_key and username:
+                return str(session_key).strip(), str(username).strip()
+        except pylast.WSError as exc:
+            # Code 14: This token has not been authorized yet
+            if str(exc.status) == "14" or "not been authorized" in str(exc.details).lower():
+                pass
+            else:
+                raise LastFMAuthError(
+                    f"Last.fm authorization rejected with code {exc.status}: {exc.details}"
+                ) from exc
+        except (pylast.NetworkError, pylast.MalformedResponseError) as exc:
+            logger.warning(f"Transient network error while checking authorization: {exc}")
+        except Exception as exc:
+            raise LastFMAuthError(f"Unexpected error during authorization: {exc}") from exc
+
+        # Wait using stop_event to allow instantaneous SIGINT/SIGTERM interruption
+        if stop_event.wait(timeout=poll_interval):
+            raise LastFMAuthCancelledError("Authorization cancelled by shutdown signal.")
+
+    raise LastFMAuthCancelledError("Authorization cancelled by shutdown signal.")
 
 
 class LastFMClient:

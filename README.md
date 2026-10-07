@@ -40,46 +40,58 @@ Most open-source Last.fm auto-scrobblers share the same limitations:
 
 ## Quick Start (Docker)
 
-### 1. Clone Repository
+### Option A: Using Pre-Built Image (No Git Clone Required)
+
+1. Create a project folder and generate the starter configuration files:
 
 ```bash
-git clone https://github.com/KirbyHacks/ScrobbleForge.git
-cd "ScrobbleForge"
+# On Linux / macOS:
+docker run --rm -v "${PWD}:/out" ghcr.io/kirbyhacks/scrobbleforge:latest init
+
+# On Windows PowerShell:
+docker run --rm -v "${PWD}:/out" ghcr.io/kirbyhacks/scrobbleforge:latest init
 ```
 
-### 2. Configure Environment
+*(Alternatively, download `docker-compose.yml` and `.env.example` directly from GitHub).*
 
-Copy the template file:
-
-```bash
-cp .env.example .env
-```
-
-Edit `.env` with your Last.fm API credentials and desired Spotify playlist URL:
+2. Edit `.env` with your Last.fm API Key, API Secret, and Spotify URL:
 
 ```dotenv
 LASTFM_API_KEY=your_lastfm_api_key
 LASTFM_API_SECRET=your_lastfm_api_secret
-LASTFM_USERNAME=your_username
-LASTFM_SESSION_KEY=your_session_key
-
 SPOTIFY_PLAYLIST_URL=https://open.spotify.com/playlist/37i9dQZF1DXcBWIGoYBM5M
-SCROBBLE_MODE=realistic
 ```
 
-### 3. Authorize Account
-
-Run the interactive authorization helper:
+3. Start the container:
 
 ```bash
-python auth_helper.py
+docker compose up -d
+docker compose logs -f
 ```
 
-Follow the prompt to approve access in your browser. The generated `LASTFM_SESSION_KEY` is saved automatically to `.env`.
+4. **1-Click Zero-Restart Authorization**:
+   On first launch, ScrobbleForge displays an authorization link in the container logs:
+   ```text
+   ======================================================================
+   [ACTION REQUIRED] AUTHORIZE LAST.FM IN YOUR BROWSER
+   Please open the following link and click "Yes, allow access":
 
-### 4. Start Container
+     https://www.last.fm/api/auth/?api_key=...&token=...
+
+   Waiting for browser approval (checking every 6s, 15m timeout)...
+   ======================================================================
+   ```
+   Open the link in your browser and click **"Yes, allow access"**. ScrobbleForge automatically detects your approval, saves the permanent key to `data/session.key`, and immediately begins scrobbling — **no restarts needed**.
+
+---
+
+### Option B: Build from Source
 
 ```bash
+git clone https://github.com/KirbyHacks/ScrobbleForge.git
+cd "ScrobbleForge"
+cp .env.example .env
+# Edit .env with your credentials, then:
 docker compose up -d --build
 docker compose logs -f
 ```
@@ -88,14 +100,14 @@ docker compose logs -f
 
 ## Configuration Reference
 
-Settings can be specified in `.env` or passed as Docker environment variables.
+Settings can be specified in `.env` or passed directly as Docker environment variables.
 
 | Variable | Default | Description |
 |---|---|---|
-| `LASTFM_API_KEY` | *(required)* | Last.fm API Key (from last.fm/api/account/create) |
+| `LASTFM_API_KEY` | *(required)* | Last.fm API Key (from [last.fm/api/account/create](https://www.last.fm/api/account/create)) |
 | `LASTFM_API_SECRET` | *(required)* | Last.fm Shared Secret |
-| `LASTFM_USERNAME` | *(required)* | Last.fm Account Username |
-| `LASTFM_SESSION_KEY` | *(required)* | Permanent session token generated via `auth_helper.py` |
+| `LASTFM_USERNAME` | *(optional)* | Last.fm Account Username (auto-detected on authorization) |
+| `LASTFM_SESSION_KEY` | *(auto-generated)* | Permanent session key. If omitted, ScrobbleForge logs a 1-click web approval link and auto-saves to `data/session.key` |
 | `SPOTIFY_PLAYLIST_URL` | *(required)* | Spotify playlist, album, or single track URL. Comma-separate for multiple sources |
 | `SCROBBLE_MODE` | `realistic` | Pacing mode: `realistic`, `max_limit`, or `custom_interval` |
 | `CUSTOM_INTERVAL_SECONDS` | `60` | Delay in seconds when `SCROBBLE_MODE=custom_interval` |

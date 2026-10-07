@@ -69,12 +69,30 @@ def load_config(env_path: Optional[str] = None) -> AppConfig:
         else:
             load_dotenv()
 
+    # System settings
+    data_dir = Path(os.getenv("DATA_DIR", "./data")).resolve()
+    system_cfg = SystemConfig(
+        data_dir=data_dir,
+        log_level=os.getenv("LOG_LEVEL", "INFO").strip().upper(),
+    )
+
     # Last.fm credentials
+    session_key = os.getenv("LASTFM_SESSION_KEY", "").strip() or None
+    if not session_key:
+        session_file = data_dir / "session.key"
+        if session_file.is_file():
+            try:
+                content = session_file.read_text(encoding="utf-8").strip()
+                if content:
+                    session_key = content
+            except Exception:
+                pass
+
     lastfm_cfg = LastFMConfig(
         api_key=os.getenv("LASTFM_API_KEY", "").strip(),
         api_secret=os.getenv("LASTFM_API_SECRET", "").strip(),
         username=os.getenv("LASTFM_USERNAME", "").strip(),
-        session_key=os.getenv("LASTFM_SESSION_KEY", "").strip() or None,
+        session_key=session_key,
         password=os.getenv("LASTFM_PASSWORD", "").strip() or None,
     )
 
@@ -108,12 +126,7 @@ def load_config(env_path: Optional[str] = None) -> AppConfig:
         ),
     )
 
-    # System settings
-    data_dir = Path(os.getenv("DATA_DIR", "./data")).resolve()
-    system_cfg = SystemConfig(
-        data_dir=data_dir,
-        log_level=os.getenv("LOG_LEVEL", "INFO").strip().upper(),
-    )
+
 
     return AppConfig(
         lastfm=lastfm_cfg,

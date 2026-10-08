@@ -7,6 +7,8 @@ from .models import Track
 
 logger = logging.getLogger("scrobbler.lastfm")
 
+LASTFM_MIN_SCROBBLE_DURATION_SEC = 30
+
 
 class LastFMAuthError(Exception):
     """Raised on authentication or session failure."""
@@ -152,7 +154,7 @@ class LastFMClient:
         if not self.network:
             return False
 
-        scrobble_duration = max(30, track.duration_sec)
+        scrobble_duration = max(LASTFM_MIN_SCROBBLE_DURATION_SEC, track.duration_sec)
 
         try:
             self.network.update_now_playing(
@@ -174,7 +176,7 @@ class LastFMClient:
             raise LastFMAuthError("Last.fm client is not authenticated.")
 
         ts = timestamp if timestamp is not None else int(time.time())
-        scrobble_duration = max(30, track.duration_sec)
+        scrobble_duration = max(LASTFM_MIN_SCROBBLE_DURATION_SEC, track.duration_sec)
 
         try:
             self.network.scrobble(

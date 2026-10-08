@@ -25,6 +25,8 @@ from .spotify_client import SpotifyClient, SpotifyIngestionError
 
 logger = logging.getLogger("scrobbler.engine")
 
+LASTFM_MIN_SCROBBLE_DURATION_SEC = 30
+
 
 def is_transient_error(exc: Exception) -> bool:
     """Identifies transient network or infrastructure errors eligible for backoff and retry."""
@@ -172,13 +174,13 @@ class ScrobblerEngine:
         track_start_time = int(time.time())
         duration_sec = track.duration_sec
         # last.fm requires minimum 30s duration
-        scrobble_duration = max(30, duration_sec)
+        scrobble_duration = max(LASTFM_MIN_SCROBBLE_DURATION_SEC, duration_sec)
 
         if self.cfg.engine.update_now_playing:
             self.lastfm.update_now_playing(track)
 
         # scrobble at min(50%, 240s) with 30s platform floor
-        scrobble_threshold = max(30, min(scrobble_duration // 2, 240))
+        scrobble_threshold = max(LASTFM_MIN_SCROBBLE_DURATION_SEC, min(scrobble_duration // 2, 240))
         remaining_duration = max(0, duration_sec - scrobble_threshold)
 
         logger.info(f"[NOW PLAYING] {track.display_name} ({track.formatted_duration}) -> scrobble at 50%")
@@ -213,7 +215,7 @@ class ScrobblerEngine:
         track_timestamp = self.virtual_timeline_cursor
         duration_sec = track.duration_sec
         # last.fm requires minimum 30s duration
-        scrobble_duration = max(30, duration_sec)
+        scrobble_duration = max(LASTFM_MIN_SCROBBLE_DURATION_SEC, duration_sec)
 
         self.lastfm.scrobble(track, timestamp=track_timestamp)
         self.tracker.record_scrobble(track.artist, track.title, timestamp=now)

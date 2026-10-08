@@ -30,7 +30,6 @@ class TestConfigValidation(unittest.TestCase):
             "LOOP",
             "UPDATE_NOW_PLAYING",
             "MAX_DAILY_SCROBBLES",
-            "MIN_TRACK_DURATION_SECONDS",
             "INTER_TRACK_PAUSE_MIN",
             "INTER_TRACK_PAUSE_MAX",
             "SPOTIFY_REFRESH_INTERVAL_HOURS",
@@ -45,7 +44,6 @@ class TestConfigValidation(unittest.TestCase):
         self.assertTrue(cfg.engine.loop)
         self.assertTrue(cfg.engine.update_now_playing)
         self.assertEqual(cfg.engine.max_daily_scrobbles, 2750)
-        self.assertEqual(cfg.engine.min_track_duration_seconds, 30)
         self.assertEqual(cfg.engine.inter_track_pause_min, 1.0)
         self.assertEqual(cfg.engine.inter_track_pause_max, 4.0)
         self.assertEqual(cfg.spotify.refresh_interval_hours, 12.0)

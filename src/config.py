@@ -112,7 +112,6 @@ class EngineConfig:
     loop: bool = True
     update_now_playing: bool = True
     max_daily_scrobbles: int = 2750
-    min_track_duration_seconds: int = 30
     inter_track_pause_min: float = 1.0
     inter_track_pause_max: float = 4.0
 
@@ -210,12 +209,6 @@ class AppConfig:
             min_val=1,
             max_val=2800,
         )
-        min_duration = _parse_int(
-            "MIN_TRACK_DURATION_SECONDS",
-            os.getenv("MIN_TRACK_DURATION_SECONDS"),
-            default=30,
-            min_val=1,
-        )
         pause_min = _parse_float(
             "INTER_TRACK_PAUSE_MIN",
             os.getenv("INTER_TRACK_PAUSE_MIN"),
@@ -244,7 +237,6 @@ class AppConfig:
             loop=loop,
             update_now_playing=update_now_playing,
             max_daily_scrobbles=max_daily,
-            min_track_duration_seconds=min_duration,
             inter_track_pause_min=pause_min,
             inter_track_pause_max=pause_max,
         )

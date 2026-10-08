@@ -9,6 +9,10 @@ from .quota_tracker import QuotaTracker
 logger = logging.getLogger("scrobbler.queue")
 
 
+# track identity vs occurrence:
+# the queue distinguishes tracks by content identifier (spotify_id or composite metadata).
+# duplicates within a playlist (multiple occurrences of the same track) are modeled as distinct positions in the sequence.
+# the reconstruction algorithm preserves multi-set occurrence multiplicity using a fifo queue pool (pool[tid].pop(0)).
 def _track_identifier(track: Track) -> str:
     """Generates a stable unique identifier string for a track."""
     if track.spotify_id:

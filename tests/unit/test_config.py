@@ -189,6 +189,21 @@ class TestConfigValidation(unittest.TestCase):
         self.assertIsNone(cfg.spotify.client_id)
         self.assertIsNone(cfg.spotify.client_secret)
 
+    @patch("src.config.load_dotenv")
+    def test_session_key_present_with_username_none_boots_cleanly(self, mock_dotenv):
+        """Verifies that configuration with session_key present but username omitted/None boots cleanly without AttributeError."""
+        os.environ["LASTFM_API_KEY"] = "valid_api_key"
+        os.environ["LASTFM_API_SECRET"] = "valid_api_secret"
+        os.environ["LASTFM_SESSION_KEY"] = "valid_session_key"
+        os.environ.pop("LASTFM_USERNAME", None)
+
+        cfg = AppConfig.from_env()
+
+        self.assertEqual(cfg.lastfm.api_key, "valid_api_key")
+        self.assertEqual(cfg.lastfm.api_secret, "valid_api_secret")
+        self.assertEqual(cfg.lastfm.session_key, "valid_session_key")
+        self.assertIsNone(cfg.lastfm.username)
+
 
 if __name__ == "__main__":
     unittest.main()

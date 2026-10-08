@@ -115,17 +115,23 @@ class ScrobblerEngine:
                     track = self.pending_track
 
                 if mode == "realistic":
-                    self._execute_realistic_step(track)
+                    resolved = self._execute_realistic_step(track)
                 elif mode == "max_limit":
-                    self._execute_max_limit_step(track)
+                    resolved = self._execute_max_limit_step(track)
                 elif mode == "custom_interval":
-                    self._execute_custom_interval_step(track)
+                    resolved = self._execute_custom_interval_step(track)
                 else:
-                    self._execute_realistic_step(track)
+                    resolved = self._execute_realistic_step(track)
 
-                self.queue.commit_track_progress()
-                self.pending_track = None
-                self.consecutive_errors = 0
+                if resolved:
+                    self.queue.commit_track_progress()
+                    self.pending_track = None
+                    self.consecutive_errors = 0
+                else:
+                    # Aborted before submission: do not commit progress, keep pending_track
+                    if self.stop_event.is_set():
+                        break
+                    continue
 
             except LastFMAuthError as e:
                 logger.error(f"[AUTH ERROR] fatal last.fm authentication error: {e}")
@@ -172,7 +178,7 @@ class ScrobblerEngine:
             )
             self.stop_event.wait(timeout=wait_seconds)
 
-    def _execute_realistic_step(self, track: Track):
+    def _execute_realistic_step(self, track: Track) -> bool:
         track_start_time = int(time.time())
         duration_sec = track.duration_sec
         # last.fm requires minimum 30s duration
@@ -188,7 +194,10 @@ class ScrobblerEngine:
         logger.info(f"[NOW PLAYING] {track.display_name} ({track.formatted_duration}) -> scrobble at 50%")
 
         if self.stop_event.wait(timeout=scrobble_threshold):
-            return
+            return False
+
+        if self.stop_event.is_set():
+            return False
 
         scrobbled = self.lastfm.scrobble(track, timestamp=track_start_time)
         now = int(time.time())
@@ -203,15 +212,16 @@ class ScrobblerEngine:
 
         if remaining_duration > 0:
             if self.stop_event.wait(timeout=remaining_duration):
-                return
+                return True
 
         jitter = random.uniform(
             self.cfg.engine.inter_track_pause_min,
             self.cfg.engine.inter_track_pause_max,
         )
         self.stop_event.wait(timeout=jitter)
+        return True
 
-    def _execute_max_limit_step(self, track: Track):
+    def _execute_max_limit_step(self, track: Track) -> bool:
         now = int(time.time())
 
         # strictly monotonic virtual timeline advancement
@@ -222,21 +232,21 @@ class ScrobblerEngine:
         # last.fm requires minimum 30s duration
         scrobble_duration = max(LASTFM_MIN_SCROBBLE_DURATION_SEC, duration_sec)
 
-        # Present catch-up policy
-        is_caught_up = self.virtual_timeline_cursor >= (now - scrobble_duration - 10)
-
+        wait_needed = 0
         if self.virtual_timeline_cursor > (now - scrobble_duration):
             wait_needed = self.virtual_timeline_cursor + scrobble_duration - now
             if wait_needed > 0:
                 logger.info(
                     f"[TIMELINE] caught up to wall-clock present -> pausing {wait_needed}s for next non-future window"
                 )
-                self.stop_event.wait(timeout=wait_needed)
+                if self.stop_event.wait(timeout=wait_needed):
+                    return False
                 now = int(time.time())
 
+        if self.stop_event.is_set():
+            return False
+
         effective_timestamp = min(self.virtual_timeline_cursor, now - scrobble_duration)
-        if effective_timestamp > now:
-            effective_timestamp = now - scrobble_duration
 
         scrobbled = self.lastfm.scrobble(track, timestamp=effective_timestamp)
         if scrobbled:
@@ -251,14 +261,14 @@ class ScrobblerEngine:
         self.virtual_timeline_cursor = effective_timestamp + scrobble_duration + 2
         self.tracker.set_state("virtual_timeline_cursor", str(self.virtual_timeline_cursor))
 
-        if is_caught_up:
-            pace_delay = max(float(scrobble_duration + 2), random.uniform(31.5, 33.0))
-        else:
-            pace_delay = random.uniform(31.5, 33.0)
-
+        pace_delay = 2.0 if wait_needed > 0 else random.uniform(31.5, 33.0)
         self.stop_event.wait(timeout=pace_delay)
+        return True
 
-    def _execute_custom_interval_step(self, track: Track):
+    def _execute_custom_interval_step(self, track: Track) -> bool:
+        if self.stop_event.is_set():
+            return False
+
         now = int(time.time())
         scrobbled = self.lastfm.scrobble(track, timestamp=now)
         if scrobbled:
@@ -271,6 +281,7 @@ class ScrobblerEngine:
             logger.warning(f"[SCROBBLE IGNORED] Last.fm ignored scrobble for {track.display_name}")
 
         self.stop_event.wait(timeout=self.cfg.engine.custom_interval_seconds)
+        return True
 
     def _check_periodic_refresh(self):
         if not self.spotify or not self.cfg.spotify.sources:

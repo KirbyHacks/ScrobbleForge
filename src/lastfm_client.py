@@ -1,5 +1,4 @@
 import logging
-import re
 import threading
 import time
 from typing import Optional, Tuple
@@ -98,13 +97,13 @@ class LastFMClient:
         self,
         api_key: str,
         api_secret: str,
-        username: str,
+        username: Optional[str] = None,
         session_key: Optional[str] = None,
         password: Optional[str] = None,
     ):
         self.api_key = api_key.strip()
         self.api_secret = api_secret.strip()
-        self.username = username.strip()
+        self.username = (username or "").strip() or None
         self.session_key = session_key.strip() if session_key else None
         self.password = password.strip() if password else None
         self.network: Optional[pylast.LastFMNetwork] = None
@@ -143,7 +142,10 @@ class LastFMClient:
         try:
             user = self.network.get_authenticated_user()
             if user:
-                logger.info(f"Verified Last.fm session for user: '{user.get_name()}'")
+                auto_name = user.get_name()
+                if not self.username and auto_name:
+                    self.username = auto_name
+                logger.info(f"Verified Last.fm session for user: '{self.username or auto_name or 'authenticated'}'")
         except pylast.WSError as e:
             if "Invalid session" in str(e) or e.status == "9":
                 raise LastFMAuthError(f"Session key invalid or expired: {e.details}") from e
@@ -173,52 +175,56 @@ class LastFMClient:
             return False
 
     def scrobble(self, track: Track, timestamp: Optional[int] = None) -> bool:
-        """Submits track.scrobble to Last.fm."""
+        """Submits track.scrobble to Last.fm via pylast._Request and inspects response XML."""
         if not self.network:
             raise LastFMAuthError("Last.fm client is not authenticated.")
 
         ts = timestamp if timestamp is not None else int(time.time())
         scrobble_duration = max(LASTFM_MIN_SCROBBLE_DURATION_SEC, track.duration_sec)
 
-        try:
-            res = self.network.scrobble(
-                artist=track.artist,
-                title=track.title,
-                timestamp=ts,
-                album=track.album if track.album else None,
-                album_artist=track.album_artist if track.album_artist else None,
-                track_number=track.track_number,
-                duration=scrobble_duration,
-            )
-            if res is not None:
-                ignored_code = None
-                ignored_msg = ""
-                if isinstance(res, minidom.Node):
-                    nodes = res.getElementsByTagName("ignoredMessage")
-                    if nodes:
-                        node = nodes[0]
-                        ignored_code = node.getAttribute("code")
-                        ignored_msg = (
-                            node.firstChild.nodeValue
-                            if (node.firstChild and hasattr(node.firstChild, "nodeValue"))
-                            else ""
-                        )
-                elif isinstance(res, dict):
-                    ignored_code = res.get("ignoredMessage", {}).get("code") or res.get("ignoredMessageCode")
-                    ignored_msg = res.get("ignoredMessage", {}).get("#text") or res.get("ignoredMessage")
-                elif isinstance(res, str) and 'ignoredMessage code="' in res:
-                    m = re.search(r'ignoredMessage code="([^"]*)"[^>]*>(.*?)</ignoredMessage>', res)
-                    if m:
-                        ignored_code = m.group(1)
-                        ignored_msg = m.group(2)
-                elif hasattr(res, "ignored_code") and isinstance(getattr(res, "ignored_code", None), (str, int)):
-                    ignored_code = str(getattr(res, "ignored_code"))
-                    ignored_msg = str(getattr(res, "ignored_message", ""))
+        params = {
+            "artist[0]": track.artist,
+            "track[0]": track.title,
+            "timestamp[0]": str(ts),
+            "duration[0]": str(scrobble_duration),
+        }
+        if track.album:
+            params["album[0]"] = track.album
+        if track.album_artist:
+            params["albumArtist[0]"] = track.album_artist
+        if track.track_number:
+            params["trackNumber[0]"] = str(track.track_number)
 
-                if ignored_code is not None and str(ignored_code) != "0":
-                    logger.warning(
-                        f"Last.fm ignored scrobble for '{track.display_name}' (code {ignored_code}: {ignored_msg})"
+        try:
+            doc = pylast._Request(self.network, "track.scrobble", params).execute()
+
+            # Check <scrobbles ignored="N">
+            scrobbles_nodes = doc.getElementsByTagName("scrobbles")
+            if scrobbles_nodes:
+                ignored_count = scrobbles_nodes[0].getAttribute("ignored")
+                if ignored_count and ignored_count != "0":
+                    msg_nodes = doc.getElementsByTagName("ignoredMessage")
+                    code = msg_nodes[0].getAttribute("code") if msg_nodes else "unknown"
+                    message = (
+                        msg_nodes[0].firstChild.nodeValue
+                        if (msg_nodes and msg_nodes[0].firstChild and hasattr(msg_nodes[0].firstChild, "nodeValue"))
+                        else ""
                     )
+                    logger.warning(f"[IGNORED SCROBBLE] code {code}: {message}")
+                    return False
+
+            # Check <ignoredMessage code="...">
+            msg_nodes = doc.getElementsByTagName("ignoredMessage")
+            if msg_nodes:
+                node = msg_nodes[0]
+                code = node.getAttribute("code")
+                if code and code != "0":
+                    message = (
+                        node.firstChild.nodeValue
+                        if (node.firstChild and hasattr(node.firstChild, "nodeValue"))
+                        else ""
+                    )
+                    logger.warning(f"[IGNORED SCROBBLE] code {code}: {message}")
                     return False
 
             return True

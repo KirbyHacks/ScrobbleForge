@@ -4,7 +4,7 @@ import tempfile
 import threading
 from pathlib import Path
 import unittest
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 if str(PROJECT_ROOT) not in sys.path:
@@ -17,6 +17,7 @@ ensure_dependencies_mocked()
 import pylast
 from src.config import load_config
 from src.lastfm_client import (
+    LastFMClient,
     poll_web_auth,
     LastFMAuthCancelledError,
     LastFMAuthTimeoutError,
@@ -112,6 +113,42 @@ class TestAuthResolution(unittest.TestCase):
                 poll_interval=0.01,
                 timeout_seconds=0.05,
             )
+
+    @patch("pylast.LastFMNetwork")
+    def test_client_initialization_with_username_none_boots_cleanly_and_autodetects(self, mock_network_cls):
+        """Verifies that LastFMClient boots without AttributeError when username=None and auto-detects from session."""
+        mock_network = MagicMock()
+        mock_user = MagicMock()
+        mock_user.get_name.return_value = "autodetected_user"
+        mock_network.get_authenticated_user.return_value = mock_user
+        mock_network_cls.return_value = mock_network
+
+        client = LastFMClient(
+            api_key="valid_key",
+            api_secret="valid_secret",
+            username=None,
+            session_key="valid_session_key",
+        )
+
+        self.assertIsNotNone(client)
+        self.assertEqual(client.username, "autodetected_user")
+
+    @patch("pylast.LastFMNetwork")
+    def test_client_initialization_with_username_none_and_no_user_detected_stays_none(self, mock_network_cls):
+        """Verifies that LastFMClient stays username=None if authenticated user lookup returns None without error."""
+        mock_network = MagicMock()
+        mock_network.get_authenticated_user.return_value = None
+        mock_network_cls.return_value = mock_network
+
+        client = LastFMClient(
+            api_key="valid_key",
+            api_secret="valid_secret",
+            username=None,
+            session_key="valid_session_key",
+        )
+
+        self.assertIsNotNone(client)
+        self.assertIsNone(client.username)
 
 
 if __name__ == "__main__":

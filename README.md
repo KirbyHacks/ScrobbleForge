@@ -41,7 +41,7 @@ ScrobbleForge replaces subjective claims with explicit, software-controlled mech
 - Yields ~300 to 500 scrobbles per day, paced strictly by actual track durations.
 
 ### 2. `max_limit` (High-Throughput Virtual Timeline)
-Designed to maximize daily scrobble throughput up to the configured safety ceiling (`MAX_DAILY_SCROBBLES`, default 2,750/day) while generating a strictly monotonically increasing, non-overlapping virtual playback timeline.
+Accelerates initial ingestion via historical timeline synthesis while enforcing the configured daily safety ceiling (`MAX_DAILY_SCROBBLES`, default 2,750/day buffer). While this ceiling acts as an upper safety guard against API rate limits, sustained long-term throughput settles around ~400–500 scrobbles/day to respect authentic track playback durations and timeline monotonicity without generating future timestamps.
 
 #### Mathematical Timeline Model
 - **Real-Time HTTP Submission Cadence**: In `max_limit` mode, real-time HTTP submissions occur every ~32 seconds (`random.uniform(31.5, 33.0)`).
@@ -50,9 +50,13 @@ Designed to maximize daily scrobble throughput up to the configured safety ceili
   ```text
   timestamp[i+1] = timestamp[i] + max(30, duration_sec) + 2s
   ```
-  The timeline is strictly monotonically increasing ($\text{timestamp}_{n+1} \ge \text{timestamp}_n + \max(30, \text{duration}_n) + 2\text{s}$) and handles catching up to the real-time present without jumping backwards into the past.
+  The timeline is strictly monotonically increasing ($\text{timestamp}_{n+1} \ge \text{timestamp}_n + \max(30, \text{duration}_n) + 2\text{s}$). Once the virtual cursor reaches the wall-clock present, it transitions to real-time duration pacing to prevent future timestamps, capping sustained throughput at ~400–500 tracks/day without jumping backwards into the past.
 - **Contiguous Virtual History**: By decoupling the physical HTTP submission cadence (~32s) from the virtual playback timeline (`duration_sec + 2s padding`), this produces a contiguous, sequential, non-overlapping listening history on Last.fm without compressing song lengths or generating overlapping playback intervals.
 - **Rolling Quota Enforcement**: Records each submission at actual submission time (`now`) in the rolling 24-hour SQLite ledger, automatically throttling when the count reaches `MAX_DAILY_SCROBBLES` until older timestamps age out.
+
+#### Real Throughput Dynamics & Present Convergence
+- **Initial High-Throughput Burst**: Because virtual timestamps start in the 3-day buffer window (`now - 3 days`), `max_limit` delivers an initial high-throughput burst submitting tracks every ~32 seconds. Over the first ~13 hours of continuous operation, the engine can submit up to ~1,440 tracks into this historical window without timestamps colliding or breaching the wall-clock present.
+- **Convergence to Authentic Playback Rate**: Because virtual time advances ~6.6× faster than wall-clock time (~212s authentic duration vs ~32s submission), the cursor catches up to the wall-clock present (~13 hours in). Once caught up, non-overlapping timeline monotonicity prevents future timestamps by pausing for each track's authentic duration before submitting. The 2,750/day limit remains an upper safety ceiling; the actual sustained rate settles around ~400–500 tracks/day.
 
 ### 3. `custom_interval` (Fixed Interval Submission)
 - Submits scrobbles at a fixed user-defined interval in seconds (`CUSTOM_INTERVAL_SECONDS`, default 60s).

@@ -171,9 +171,12 @@ class QueueManager:
 
         track = self.queue[self.current_index]
         self.current_index += 1
+        return track
+
+    def commit_track_progress(self):
+        """Persists the current playback index to SQLite state store after confirmed scrobble."""
         if self.tracker:
             self.tracker.set_state("queue_index", str(self.current_index))
-        return track
 
     def peek_current_track(self) -> Optional[Track]:
         """Looks at the next track without advancing."""

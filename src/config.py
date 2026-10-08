@@ -87,11 +87,24 @@ def _parse_float(
     return parsed
 
 
+def _clean_credential(val: Optional[str]) -> Optional[str]:
+    """Filters out empty strings and standard template placeholders."""
+    if val is None:
+        return None
+    s = str(val).strip()
+    if not s:
+        return None
+    low = s.lower()
+    if "your_" in low or "placeholder" in low:
+        return None
+    return s
+
+
 @dataclass
 class LastFMConfig:
-    api_key: str
-    api_secret: str
-    username: str
+    api_key: Optional[str] = None
+    api_secret: Optional[str] = None
+    username: Optional[str] = None
     session_key: Optional[str] = None
     password: Optional[str] = None
 
@@ -150,23 +163,22 @@ class AppConfig:
         )
 
         # last.fm credentials
-        session_key = os.getenv("LASTFM_SESSION_KEY", "").strip() or None
+        session_key = _clean_credential(os.getenv("LASTFM_SESSION_KEY"))
         if not session_key:
             session_file = data_dir / "session.key"
             if session_file.is_file():
                 try:
                     content = session_file.read_text(encoding="utf-8").strip()
-                    if content:
-                        session_key = content
+                    session_key = _clean_credential(content)
                 except Exception:
                     pass
 
         lastfm_cfg = LastFMConfig(
-            api_key=os.getenv("LASTFM_API_KEY", "").strip(),
-            api_secret=os.getenv("LASTFM_API_SECRET", "").strip(),
-            username=os.getenv("LASTFM_USERNAME", "").strip(),
+            api_key=_clean_credential(os.getenv("LASTFM_API_KEY")),
+            api_secret=_clean_credential(os.getenv("LASTFM_API_SECRET")),
+            username=_clean_credential(os.getenv("LASTFM_USERNAME")),
             session_key=session_key,
-            password=os.getenv("LASTFM_PASSWORD", "").strip() or None,
+            password=_clean_credential(os.getenv("LASTFM_PASSWORD")),
         )
 
         # spotify configuration
@@ -180,8 +192,8 @@ class AppConfig:
         )
         spotify_cfg = SpotifyConfig(
             sources=sources,
-            client_id=os.getenv("SPOTIFY_CLIENT_ID", "").strip() or None,
-            client_secret=os.getenv("SPOTIFY_CLIENT_SECRET", "").strip() or None,
+            client_id=_clean_credential(os.getenv("SPOTIFY_CLIENT_ID")),
+            client_secret=_clean_credential(os.getenv("SPOTIFY_CLIENT_SECRET")),
             refresh_interval_hours=refresh_hours,
         )
 

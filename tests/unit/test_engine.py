@@ -7,6 +7,7 @@ import threading
 import time
 import unittest
 from unittest.mock import MagicMock, patch
+from xml.dom import minidom
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 if str(PROJECT_ROOT) not in sys.path:
@@ -117,8 +118,15 @@ class TestScrobblerEngine(unittest.TestCase):
         engine.virtual_timeline_cursor = now - 30
         self.mock_lfm.scrobbles.clear()
 
-        for t in tracks:
-            engine._execute_max_limit_step(t)
+        sim_now = [now]
+        def advance_wait(timeout=None):
+            if timeout:
+                sim_now[0] += int(timeout)
+            return False
+
+        with patch("time.time", side_effect=lambda: sim_now[0]), patch.object(stop_event, "wait", side_effect=advance_wait):
+            for t in tracks:
+                engine._execute_max_limit_step(t)
 
         submitted_timestamps = [ts for (_, ts) in self.mock_lfm.scrobbles]
         durations = [t.duration_sec for t in tracks]
@@ -421,6 +429,139 @@ class TestScrobblerEngine(unittest.TestCase):
         self.assertFalse(is_transient_error(TypeError("bad type")))
         self.assertFalse(is_transient_error(ZeroDivisionError("zero division")))
         self.assertFalse(is_transient_error(ValueError("bad value")))
+
+    def test_max_limit_simulation_2000_steps_monotonic_and_non_future(self):
+        """Simulation test: 2,000 synthetic steps advancing simulated wall-clock time by 32s each step.
+        Asserts that effective_timestamp <= simulated_now is strictly maintained for 100% of iterations.
+        """
+        mock_tracker = MagicMock(spec=QuotaTracker)
+        mock_tracker.get_state.return_value = None
+        mock_tracker.get_rolling_24h_count.return_value = 1
+        cfg = AppConfig(
+            lastfm=LastFMConfig(api_key="k", api_secret="s", username="u"),
+            spotify=SpotifyConfig(),
+            engine=EngineConfig(mode="max_limit", max_daily_scrobbles=2750),
+            system=SystemConfig(data_dir=Path(self.temp_dir.name)),
+        )
+        tracks = [
+            Track(title=f"Synthetic Track {i}", artist="Artist", duration_ms=random.randint(30000, 240000))
+            for i in range(50)
+        ]
+        qm = QueueManager(tracks=tracks, tracker=mock_tracker, shuffle=False, loop=True)
+        stop_event = threading.Event()
+
+        mock_lfm = MockLastFM()
+        engine = ScrobblerEngine(
+            config=cfg,
+            lastfm=mock_lfm,
+            spotify=None,
+            queue=qm,
+            tracker=mock_tracker,
+            stop_event=stop_event,
+        )
+
+        simulated_now = [1700000000]
+        # Start timeline 3 days ago as standard
+        engine.virtual_timeline_cursor = simulated_now[0] - (3 * 86400)
+
+        with patch("time.time", side_effect=lambda: simulated_now[0]), patch.object(stop_event, "wait", return_value=False):
+            for step in range(2000):
+                simulated_now[0] += 32
+                t = qm.get_next_track()
+                engine._execute_max_limit_step(t)
+                last_scrobble = mock_lfm.scrobbles[-1]
+                effective_ts = last_scrobble[1]
+                self.assertLessEqual(
+                    effective_ts,
+                    simulated_now[0],
+                    f"Timestamp breached future at step {step}: ts={effective_ts} > now={simulated_now[0]}",
+                )
+
+        self.assertEqual(len(mock_lfm.scrobbles), 2000)
+
+    def test_lastfm_client_scrobble_detects_ignored_message(self):
+        """Verifies that LastFMClient returns False and logs warning when Last.fm returns ignoredMessage."""
+        client = LastFMClient.__new__(LastFMClient)
+        client.network = MagicMock()
+        track = Track(title="Ignored Track", artist="Artist", duration_ms=180000)
+
+        # XML DOM response with code="1" (ignored)
+        xml_ignored = minidom.parseString(
+            '<lfm status="ok"><scrobbles><scrobble><ignoredMessage code="1">Artist was ignored</ignoredMessage></scrobble></scrobbles></lfm>'
+        )
+        client.network.scrobble.return_value = xml_ignored
+        success = client.scrobble(track, timestamp=1700000000)
+        self.assertFalse(success)
+
+        # XML DOM response with code="0" (accepted)
+        xml_ok = minidom.parseString(
+            '<lfm status="ok"><scrobbles><scrobble><ignoredMessage code="0"></ignoredMessage></scrobble></scrobbles></lfm>'
+        )
+        client.network.scrobble.return_value = xml_ok
+        success_ok = client.scrobble(track, timestamp=1700000000)
+        self.assertTrue(success_ok)
+
+    def test_fatal_auth_error_exits_with_status_1(self):
+        """Verifies that LastFMAuthError halts the process with non-zero exit code (sys.exit(1))."""
+        cfg = AppConfig(
+            lastfm=LastFMConfig(api_key="k", api_secret="s", username="u"),
+            spotify=SpotifyConfig(),
+            engine=EngineConfig(mode="realistic"),
+            system=SystemConfig(data_dir=Path(self.temp_dir.name)),
+        )
+        track = Track(title="Song", artist="Artist", duration_ms=180000)
+        qm = QueueManager(tracks=[track], tracker=self.tracker, shuffle=False, loop=False)
+        stop_event = threading.Event()
+        mock_lfm = MagicMock()
+        mock_lfm.scrobble.side_effect = LastFMAuthError("Session expired")
+
+        engine = ScrobblerEngine(
+            config=cfg,
+            lastfm=mock_lfm,
+            spotify=None,
+            queue=qm,
+            tracker=self.tracker,
+            stop_event=stop_event,
+        )
+
+        with self.assertRaises(SystemExit) as ctx:
+            with patch.object(stop_event, "wait", return_value=False):
+                engine.run()
+        self.assertEqual(ctx.exception.code, 1)
+
+    def test_periodic_refresh_resilient_to_unexpected_parser_error(self):
+        """Verifies that unexpected exceptions during refresh do not crash engine and back off by 15 minutes."""
+        cfg = AppConfig(
+            lastfm=LastFMConfig(api_key="k", api_secret="s", username="u"),
+            spotify=SpotifyConfig(sources=["https://open.spotify.com/playlist/test"], refresh_interval_hours=12.0),
+            engine=EngineConfig(mode="realistic"),
+            system=SystemConfig(data_dir=Path(self.temp_dir.name)),
+        )
+        track = Track(title="Song", artist="Artist", duration_ms=180000)
+        qm = QueueManager(tracks=[track], tracker=self.tracker, shuffle=False, loop=False)
+        stop_event = threading.Event()
+        mock_spotify = MagicMock()
+        mock_spotify.fetch_sources.side_effect = ValueError("invalid literal for int(): 'corrupt'")
+
+        engine = ScrobblerEngine(
+            config=cfg,
+            lastfm=self.mock_lfm,
+            spotify=mock_spotify,
+            queue=qm,
+            tracker=self.tracker,
+            stop_event=stop_event,
+        )
+
+        now = time.time()
+        # Set last refresh to 13 hours ago (triggers refresh)
+        engine.last_refresh_time = now - (13 * 3600)
+
+        # Must not raise ValueError
+        engine._check_periodic_refresh()
+
+        # Last refresh time must be backed off by 15m (now - interval + 900)
+        expected_backoff = now - (12 * 3600) + 900
+        self.assertAlmostEqual(engine.last_refresh_time, expected_backoff, delta=5.0)
 
 
 if __name__ == "__main__":

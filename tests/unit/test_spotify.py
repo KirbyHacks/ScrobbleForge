@@ -1,6 +1,7 @@
 import json
 import sys
 import tempfile
+import time
 from pathlib import Path
 import unittest
 from unittest.mock import MagicMock, patch
@@ -275,6 +276,62 @@ class TestSpotifyParsingAndCache(unittest.TestCase):
             self.assertEqual(len(loaded), 2)
             self.assertEqual(loaded[0].title, "Song A")
             self.assertEqual(loaded[1].title, "Song B")
+
+    def test_cache_invalidation_on_source_change(self):
+        """Verifies that changing source URLs invalidates disk cache and triggers re-fetch."""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            cache_file = Path(tmp_dir) / "tracks.cache.json"
+            client = SpotifyClient(cache_path=cache_file)
+
+            source_1 = ["https://open.spotify.com/playlist/playlist_A"]
+            source_2 = ["https://open.spotify.com/playlist/playlist_B"]
+
+            tracks_a = [Track(title="Song A", artist="Artist A", duration_ms=180000)]
+            client.save_cache(tracks_a, source_1)
+
+            # Matching source returns cached tracks
+            self.assertEqual(len(client.load_cache(sources=source_1)), 1)
+
+            # Different source returns empty list (invalidated)
+            self.assertEqual(client.load_cache(sources=source_2), [])
+
+            # Proves fetch_sources ignores cache when sources differ
+            with patch.object(client, "fetch_embed_tracks") as mock_fetch:
+                tracks_b = [Track(title="Song B", artist="Artist B", duration_ms=210000)]
+                mock_fetch.return_value = tracks_b
+
+                result = client.fetch_sources(source_2, use_cache_if_available=True)
+                mock_fetch.assert_called_once()
+                self.assertEqual(len(result), 1)
+                self.assertEqual(result[0].title, "Song B")
+
+    def test_cache_invalidation_on_ttl_expiry(self):
+        """Verifies that cached tracks older than TTL are rejected."""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            cache_file = Path(tmp_dir) / "tracks.cache.json"
+            # 12-hour TTL
+            client = SpotifyClient(cache_path=cache_file, ttl_hours=12.0)
+
+            sources = ["https://open.spotify.com/playlist/playlist_A"]
+            tracks = [Track(title="Song A", artist="Artist A", duration_ms=180000)]
+            client.save_cache(tracks, sources)
+
+            # Simulate aging cache: 13 hours old (expired)
+            with open(cache_file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            data["saved_at"] = int(time.time()) - (13 * 3600)
+            with open(cache_file, "w", encoding="utf-8") as f:
+                json.dump(data, f)
+
+            # Expired cache must return empty list
+            self.assertEqual(client.load_cache(sources=sources), [])
+
+            # Fresh cache within TTL must return cached tracks
+            data["saved_at"] = int(time.time()) - (1 * 3600)  # 1 hour old
+            with open(cache_file, "w", encoding="utf-8") as f:
+                json.dump(data, f)
+
+            self.assertEqual(len(client.load_cache(sources=sources)), 1)
 
     def test_extract_primary_artist_matrix(self):
         # Solo artists with internal commas

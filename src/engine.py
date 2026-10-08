@@ -1,6 +1,7 @@
 import logging
 import random
 import sqlite3
+import sys
 import threading
 import time
 from typing import Optional
@@ -122,12 +123,13 @@ class ScrobblerEngine:
                 else:
                     self._execute_realistic_step(track)
 
+                self.queue.commit_track_progress()
                 self.pending_track = None
                 self.consecutive_errors = 0
 
             except LastFMAuthError as e:
                 logger.error(f"[AUTH ERROR] fatal last.fm authentication error: {e}")
-                break
+                sys.exit(1)
 
             except Exception as e:
                 if not is_transient_error(e):
@@ -188,12 +190,16 @@ class ScrobblerEngine:
         if self.stop_event.wait(timeout=scrobble_threshold):
             return
 
-        self.lastfm.scrobble(track, timestamp=track_start_time)
-        self.tracker.record_scrobble(track.artist, track.title, timestamp=track_start_time)
-        rolling_count = self.tracker.get_rolling_24h_count()
-        logger.info(
-            f"[SCROBBLED] {track.display_name} [ok] | 24h: {rolling_count:,}/{self.cfg.engine.max_daily_scrobbles:,}"
-        )
+        scrobbled = self.lastfm.scrobble(track, timestamp=track_start_time)
+        now = int(time.time())
+        if scrobbled:
+            self.tracker.record_scrobble(track.artist, track.title, timestamp=now)
+            rolling_count = self.tracker.get_rolling_24h_count()
+            logger.info(
+                f"[SCROBBLED] {track.display_name} [ok] | 24h: {rolling_count:,}/{self.cfg.engine.max_daily_scrobbles:,}"
+            )
+        else:
+            logger.warning(f"[SCROBBLE IGNORED] Last.fm ignored scrobble for {track.display_name}")
 
         if remaining_duration > 0:
             if self.stop_event.wait(timeout=remaining_duration):
@@ -212,34 +218,57 @@ class ScrobblerEngine:
         if self.virtual_timeline_cursor is None:
             self.virtual_timeline_cursor = now - (3 * 86400)
 
-        track_timestamp = self.virtual_timeline_cursor
         duration_sec = track.duration_sec
         # last.fm requires minimum 30s duration
         scrobble_duration = max(LASTFM_MIN_SCROBBLE_DURATION_SEC, duration_sec)
 
-        self.lastfm.scrobble(track, timestamp=track_timestamp)
-        self.tracker.record_scrobble(track.artist, track.title, timestamp=now)
+        # Present catch-up policy
+        is_caught_up = self.virtual_timeline_cursor >= (now - scrobble_duration - 10)
 
-        self.virtual_timeline_cursor = track_timestamp + scrobble_duration + 2
+        if self.virtual_timeline_cursor > (now - scrobble_duration):
+            wait_needed = self.virtual_timeline_cursor + scrobble_duration - now
+            if wait_needed > 0:
+                logger.info(
+                    f"[TIMELINE] caught up to wall-clock present -> pausing {wait_needed}s for next non-future window"
+                )
+                self.stop_event.wait(timeout=wait_needed)
+                now = int(time.time())
+
+        effective_timestamp = min(self.virtual_timeline_cursor, now - scrobble_duration)
+        if effective_timestamp > now:
+            effective_timestamp = now - scrobble_duration
+
+        scrobbled = self.lastfm.scrobble(track, timestamp=effective_timestamp)
+        if scrobbled:
+            self.tracker.record_scrobble(track.artist, track.title, timestamp=now)
+            rolling_count = self.tracker.get_rolling_24h_count()
+            logger.info(
+                f"[SCROBBLED] {track.display_name} [ok] | 24h: {rolling_count:,}/{self.cfg.engine.max_daily_scrobbles:,}"
+            )
+        else:
+            logger.warning(f"[SCROBBLE IGNORED] Last.fm ignored scrobble for {track.display_name}")
+
+        self.virtual_timeline_cursor = effective_timestamp + scrobble_duration + 2
         self.tracker.set_state("virtual_timeline_cursor", str(self.virtual_timeline_cursor))
 
-        rolling_count = self.tracker.get_rolling_24h_count()
-        logger.info(
-            f"[SCROBBLED] {track.display_name} [ok] | 24h: {rolling_count:,}/{self.cfg.engine.max_daily_scrobbles:,}"
-        )
+        if is_caught_up:
+            pace_delay = max(float(scrobble_duration + 2), random.uniform(31.5, 33.0))
+        else:
+            pace_delay = random.uniform(31.5, 33.0)
 
-        pace_delay = random.uniform(31.5, 33.0)
         self.stop_event.wait(timeout=pace_delay)
 
     def _execute_custom_interval_step(self, track: Track):
         now = int(time.time())
-        self.lastfm.scrobble(track, timestamp=now)
-        self.tracker.record_scrobble(track.artist, track.title, timestamp=now)
-
-        rolling_count = self.tracker.get_rolling_24h_count()
-        logger.info(
-            f"[SCROBBLED] {track.display_name} [ok] | 24h: {rolling_count:,}/{self.cfg.engine.max_daily_scrobbles:,}"
-        )
+        scrobbled = self.lastfm.scrobble(track, timestamp=now)
+        if scrobbled:
+            self.tracker.record_scrobble(track.artist, track.title, timestamp=now)
+            rolling_count = self.tracker.get_rolling_24h_count()
+            logger.info(
+                f"[SCROBBLED] {track.display_name} [ok] | 24h: {rolling_count:,}/{self.cfg.engine.max_daily_scrobbles:,}"
+            )
+        else:
+            logger.warning(f"[SCROBBLE IGNORED] Last.fm ignored scrobble for {track.display_name}")
 
         self.stop_event.wait(timeout=self.cfg.engine.custom_interval_seconds)
 
@@ -259,5 +288,8 @@ class ScrobblerEngine:
                 if fresh_tracks:
                     self.queue.update_tracks(fresh_tracks)
                 self.last_refresh_time = now
-            except (SpotifyIngestionError, requests.RequestException) as e:
-                logger.warning(f"[REFRESH] periodic playlist refresh failed: {e}")
+            except Exception as e:
+                logger.warning(
+                    f"[REFRESH] periodic playlist refresh failed: {e}. Backing off for 15 minutes."
+                )
+                self.last_refresh_time = now - interval_sec + 900

@@ -1,4 +1,5 @@
 import csv
+import hashlib
 import json
 import logging
 import re
@@ -359,6 +360,13 @@ class SpotifyEmbedParser:
             return cls._parse_playlist(entity, default_id=default_id)
 
 
+def compute_sources_hash(sources: List[str]) -> str:
+    """Computes a deterministic SHA-256 hash of normalized source URLs."""
+    normalized = sorted([s.strip().lower() for s in sources if s.strip()])
+    serialized = json.dumps(normalized)
+    return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
+
 class SpotifyClient:
     """Resolves Spotify playlists, albums, and tracks into standardized Track models."""
 
@@ -368,6 +376,7 @@ class SpotifyClient:
         client_secret: Optional[str] = None,
         cache_path: Optional[Path] = None,
         retries: int = 1,
+        ttl_hours: float = 12.0,
     ):
         if client_id and "your_" in client_id.lower():
             client_id = None
@@ -378,8 +387,7 @@ class SpotifyClient:
         self.client_secret = client_secret
         self.cache_path = Path(cache_path) if cache_path else None
         self.retries = max(1, retries)
-        self._access_token: Optional[str] = None
-        self._token_expires: float = 0
+        self.ttl_seconds = float(ttl_hours) * 3600.0
 
     @staticmethod
     def parse_spotify_uri(uri_or_url: str) -> Tuple[str, str]:
@@ -397,17 +405,38 @@ class SpotifyClient:
 
         return "playlist", raw.split("?")[0].strip()
 
-    def load_cache(self) -> List[Track]:
-        """Loads cached tracks from disk."""
+    def load_cache(
+        self,
+        sources: Optional[List[str]] = None,
+        max_age_seconds: Optional[float] = None,
+    ) -> List[Track]:
+        """Loads cached tracks from disk if valid, matching sources, and within TTL."""
         if not self.cache_path or not self.cache_path.is_file():
             return []
         try:
             with open(self.cache_path, "r", encoding="utf-8") as f:
                 data = json.load(f)
-                tracks = [Track.from_dict(item) for item in data.get("tracks", [])]
-                if tracks:
-                    logger.info(f"Loaded {len(tracks)} cached tracks from {self.cache_path}")
-                return tracks
+
+            if sources is not None:
+                expected_hash = compute_sources_hash(sources)
+                cached_hash = data.get("sources_hash")
+                if cached_hash != expected_hash:
+                    logger.info("[CACHE INVALID] source URLs changed -> invalidating track cache")
+                    return []
+
+            ttl = max_age_seconds if max_age_seconds is not None else self.ttl_seconds
+            saved_at = data.get("saved_at", 0)
+            now = int(time.time())
+            if (now - saved_at) >= ttl:
+                logger.info(
+                    f"[CACHE EXPIRED] cache age ({(now - saved_at)/3600:.1f}h) exceeded TTL ({ttl/3600:.1f}h) -> re-fetching"
+                )
+                return []
+
+            tracks = [Track.from_dict(item) for item in data.get("tracks", [])]
+            if tracks:
+                logger.info(f"Loaded {len(tracks)} cached tracks from {self.cache_path}")
+            return tracks
         except Exception as e:
             logger.warning(f"Could not read track cache: {e}")
             return []
@@ -421,6 +450,7 @@ class SpotifyClient:
             payload = {
                 "saved_at": int(time.time()),
                 "sources": sources,
+                "sources_hash": compute_sources_hash(sources),
                 "tracks": [t.to_dict() for t in tracks],
             }
             with open(self.cache_path, "w", encoding="utf-8") as f:
@@ -428,29 +458,6 @@ class SpotifyClient:
             logger.debug(f"Cached {len(tracks)} tracks to {self.cache_path}")
         except Exception as e:
             logger.warning(f"Could not save track cache: {e}")
-
-    def _get_api_token(self) -> Optional[str]:
-        """Requests client credentials bearer token if credentials are provided."""
-        if not self.client_id or not self.client_secret:
-            return None
-        if self._access_token and time.time() < self._token_expires:
-            return self._access_token
-
-        try:
-            resp = requests.post(
-                "https://accounts.spotify.com/api/token",
-                data={"grant_type": "client_credentials"},
-                auth=(self.client_id, self.client_secret),
-                timeout=10,
-            )
-            if resp.status_code == 200:
-                data = resp.json()
-                self._access_token = data.get("access_token")
-                self._token_expires = time.time() + data.get("expires_in", 3600) - 60
-                return self._access_token
-        except Exception as e:
-            logger.warning(f"Spotify token request failed: {e}")
-        return None
 
     def fetch_embed_tracks(self, item_type: str, item_id: str) -> List[Track]:
         """Extracts tracks and exact durations from Spotify public embed page."""
@@ -481,7 +488,7 @@ class SpotifyClient:
     def fetch_sources(self, sources: List[str], use_cache_if_available: bool = True) -> List[Track]:
         """Resolves tracks from all configured sources with cache fallback."""
         if use_cache_if_available:
-            cached = self.load_cache()
+            cached = self.load_cache(sources=sources)
             if cached:
                 return cached
 
@@ -502,7 +509,7 @@ class SpotifyClient:
 
         except Exception as e:
             logger.error(f"Error fetching tracks: {e}")
-            cached = self.load_cache()
+            cached = self.load_cache(sources=sources, max_age_seconds=float("inf"))
             if cached:
                 logger.info("Using cached tracks after fetch failure.")
                 return cached

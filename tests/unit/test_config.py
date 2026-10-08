@@ -169,6 +169,26 @@ class TestConfigValidation(unittest.TestCase):
             self.assertIn(f"Invalid boolean value for {key}", str(ctx.exception))
             os.environ.pop(key)
 
+    def test_placeholder_credentials_resolve_to_none(self):
+        """Verifies that template placeholders ('your_*', 'placeholder', empty strings) resolve to None."""
+        os.environ["LASTFM_API_KEY"] = "your_lastfm_api_key"
+        os.environ["LASTFM_API_SECRET"] = "your_lastfm_api_secret"
+        os.environ["LASTFM_USERNAME"] = "your_lastfm_username"
+        os.environ["LASTFM_SESSION_KEY"] = "your_session_key"
+        os.environ["LASTFM_PASSWORD"] = "   "
+        os.environ["SPOTIFY_CLIENT_ID"] = "placeholder_client_id"
+        os.environ["SPOTIFY_CLIENT_SECRET"] = "YOUR_CLIENT_SECRET"
+
+        cfg = AppConfig.from_env()
+
+        self.assertIsNone(cfg.lastfm.api_key)
+        self.assertIsNone(cfg.lastfm.api_secret)
+        self.assertIsNone(cfg.lastfm.username)
+        self.assertIsNone(cfg.lastfm.session_key)
+        self.assertIsNone(cfg.lastfm.password)
+        self.assertIsNone(cfg.spotify.client_id)
+        self.assertIsNone(cfg.spotify.client_secret)
+
 
 if __name__ == "__main__":
     unittest.main()

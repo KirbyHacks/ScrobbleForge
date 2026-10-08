@@ -30,17 +30,49 @@ class TestQueueManager(unittest.TestCase):
 
         t1 = qm.get_next_track()
         self.assertEqual(t1.title, "Track 0")
+        # In-memory index advanced, but SQLite not persisted until confirmed
+        self.assertIsNone(self.tracker.get_state("queue_index"))
+        qm.commit_track_progress()
         self.assertEqual(self.tracker.get_state("queue_index"), "1")
 
         t2 = qm.get_next_track()
         self.assertEqual(t2.title, "Track 1")
+        qm.commit_track_progress()
 
         t3 = qm.get_next_track()
         self.assertEqual(t3.title, "Track 2")
+        qm.commit_track_progress()
 
         # Loops back to Track 0
         t4 = qm.get_next_track()
         self.assertEqual(t4.title, "Track 0")
+
+    def test_at_least_once_uncommitted_track_replayed_on_restart(self):
+        """Verifies that an unconfirmed track during shutdown is not lost and is replayed on restart."""
+        tracks = [
+            Track(title="Track 1", artist="Artist", duration_ms=180000),
+            Track(title="Track 2", artist="Artist", duration_ms=180000),
+        ]
+        qm1 = QueueManager(tracks=tracks, tracker=self.tracker, shuffle=False, loop=False)
+
+        # Track 1 fetched for playback
+        t1 = qm1.get_next_track()
+        self.assertEqual(t1.title, "Track 1")
+        # SIGTERM simulated before confirmation: commit_track_progress() is NOT called
+
+        # Engine restarts with same tracker
+        qm2 = QueueManager(tracks=tracks, tracker=self.tracker, shuffle=False, loop=False)
+        replayed = qm2.get_next_track()
+        self.assertEqual(replayed.title, "Track 1")
+
+        # Now confirmed and committed
+        qm2.commit_track_progress()
+        self.assertEqual(self.tracker.get_state("queue_index"), "1")
+
+        # Next restart resumes to Track 2
+        qm3 = QueueManager(tracks=tracks, tracker=self.tracker, shuffle=False, loop=False)
+        t2 = qm3.get_next_track()
+        self.assertEqual(t2.title, "Track 2")
 
     def test_queue_exhaustion_without_loop(self):
         tracks = [
@@ -65,10 +97,13 @@ class TestQueueManager(unittest.TestCase):
         qm1 = QueueManager(tracks=tracks, tracker=self.tracker, shuffle=True, loop=True)
         initial_order = [t.title for t in qm1.queue]
 
-        # Scrobble 3 tracks
+        # Scrobble 3 tracks and commit each
         t0 = qm1.get_next_track()
+        qm1.commit_track_progress()
         t1 = qm1.get_next_track()
+        qm1.commit_track_progress()
         t2 = qm1.get_next_track()
+        qm1.commit_track_progress()
 
         self.assertEqual(t0.title, initial_order[0])
         self.assertEqual(t1.title, initial_order[1])
@@ -88,6 +123,7 @@ class TestQueueManager(unittest.TestCase):
 
         # Next track must be the 4th track from the initial permutation
         t3 = qm2.get_next_track()
+        qm2.commit_track_progress()
         self.assertEqual(t3.title, initial_order[3])
         self.assertEqual(qm2.current_index, 4)
         self.assertEqual(self.tracker.get_state("queue_index"), "4")

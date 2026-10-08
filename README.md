@@ -113,6 +113,7 @@ docker compose logs -f
 ```bash
 git clone https://github.com/KirbyHacks/ScrobbleForge.git
 cd "ScrobbleForge"
+mkdir -p data && chown -R 1000:1000 data  # Pre-create data directory with container permissions
 cp .env.example .env
 # Edit .env with your credentials, then:
 docker compose up -d --build

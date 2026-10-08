@@ -1,7 +1,9 @@
 import logging
+import re
 import threading
 import time
 from typing import Optional, Tuple
+from xml.dom import minidom
 import pylast
 from .models import Track
 
@@ -179,7 +181,7 @@ class LastFMClient:
         scrobble_duration = max(LASTFM_MIN_SCROBBLE_DURATION_SEC, track.duration_sec)
 
         try:
-            self.network.scrobble(
+            res = self.network.scrobble(
                 artist=track.artist,
                 title=track.title,
                 timestamp=ts,
@@ -188,6 +190,37 @@ class LastFMClient:
                 track_number=track.track_number,
                 duration=scrobble_duration,
             )
+            if res is not None:
+                ignored_code = None
+                ignored_msg = ""
+                if isinstance(res, minidom.Node):
+                    nodes = res.getElementsByTagName("ignoredMessage")
+                    if nodes:
+                        node = nodes[0]
+                        ignored_code = node.getAttribute("code")
+                        ignored_msg = (
+                            node.firstChild.nodeValue
+                            if (node.firstChild and hasattr(node.firstChild, "nodeValue"))
+                            else ""
+                        )
+                elif isinstance(res, dict):
+                    ignored_code = res.get("ignoredMessage", {}).get("code") or res.get("ignoredMessageCode")
+                    ignored_msg = res.get("ignoredMessage", {}).get("#text") or res.get("ignoredMessage")
+                elif isinstance(res, str) and 'ignoredMessage code="' in res:
+                    m = re.search(r'ignoredMessage code="([^"]*)"[^>]*>(.*?)</ignoredMessage>', res)
+                    if m:
+                        ignored_code = m.group(1)
+                        ignored_msg = m.group(2)
+                elif hasattr(res, "ignored_code") and isinstance(getattr(res, "ignored_code", None), (str, int)):
+                    ignored_code = str(getattr(res, "ignored_code"))
+                    ignored_msg = str(getattr(res, "ignored_message", ""))
+
+                if ignored_code is not None and str(ignored_code) != "0":
+                    logger.warning(
+                        f"Last.fm ignored scrobble for '{track.display_name}' (code {ignored_code}: {ignored_msg})"
+                    )
+                    return False
+
             return True
         except pylast.WSError as e:
             if str(e.status) == "29" or "Rate limit" in str(e.details):

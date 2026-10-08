@@ -68,6 +68,14 @@ def cmd_init():
     else:
         print(f"  - Skipped: {compose_path.name} (already exists)")
 
+    data_dir = out_dir / "data"
+    if not data_dir.exists():
+        try:
+            data_dir.mkdir(parents=True, exist_ok=True)
+            print(f"  + Created: {data_dir.name}/ (data storage directory)")
+        except Exception:
+            pass
+
     src_example = Path(".env.example")
     content = ""
     if src_example.is_file():
@@ -129,7 +137,7 @@ def main():
     setup_logging(config.system.log_level)
     logger = logging.getLogger("scrobbler.main")
 
-    logger.info("Initializing ScrobbleForge v1.0.0...")
+    logger.info("Initializing ScrobbleForge v1.0.1...")
 
     stop_event = threading.Event()
 

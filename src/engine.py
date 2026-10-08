@@ -81,7 +81,7 @@ class ScrobblerEngine:
             try:
                 cur = int(saved_cursor)
                 two_weeks_ago = now - (13 * 86400)
-                if two_weeks_ago < cur < (now - 60):
+                if cur > two_weeks_ago:
                     self.virtual_timeline_cursor = cur
                     logger.info(f"[TIMELINE] resumed max_limit cursor at timestamp {cur}")
                     return
@@ -208,9 +208,9 @@ class ScrobblerEngine:
     def _execute_max_limit_step(self, track: Track):
         now = int(time.time())
 
-        # sequential non-overlapping timeline backdating
-        if self.virtual_timeline_cursor is None or self.virtual_timeline_cursor >= (now - 60):
-            self.virtual_timeline_cursor = now - 86400
+        # strictly monotonic virtual timeline advancement
+        if self.virtual_timeline_cursor is None:
+            self.virtual_timeline_cursor = now - (3 * 86400)
 
         track_timestamp = self.virtual_timeline_cursor
         duration_sec = track.duration_sec
@@ -220,7 +220,7 @@ class ScrobblerEngine:
         self.lastfm.scrobble(track, timestamp=track_timestamp)
         self.tracker.record_scrobble(track.artist, track.title, timestamp=now)
 
-        self.virtual_timeline_cursor += scrobble_duration + 2
+        self.virtual_timeline_cursor = track_timestamp + scrobble_duration + 2
         self.tracker.set_state("virtual_timeline_cursor", str(self.virtual_timeline_cursor))
 
         rolling_count = self.tracker.get_rolling_24h_count()

@@ -27,6 +27,7 @@ ScrobbleForge replaces subjective claims with explicit, software-controlled mech
 - **Rolling 24-hour persistent SQLite ledger with auto-pause/resume**: Records submission timestamps in an ACID-compliant SQLite ledger using an exact 24-hour sliding window, automatically pausing when quotas approach limits and resuming as older entries age out.
 - **Configurable daily safety ceiling (default: 2,750/day buffer against Last.fm's ~2,800 limit)**: Enforces an intentional buffer below Last.fm's ~2,800 daily submission ceiling to prevent HTTP 429 rate-limiting.
 - **Authentic track duration modeling with Last.fm 30-second submission clamping**: Models true track runtimes from source metadata while strictly clamping minimum scrobble duration to 30 seconds per Last.fm API submission rules.
+- **Delivery Semantics**: Scrobble delivery operates under at-least-once semantics during ambiguous network timeouts. If Last.fm accepts a submission but the network response drops, the engine will retry upon reconnect, which may occasionally produce duplicate scrobbles for that track.
 
 ---
 
@@ -40,15 +41,16 @@ ScrobbleForge replaces subjective claims with explicit, software-controlled mech
 - Yields ~300 to 500 scrobbles per day, paced strictly by actual track durations.
 
 ### 2. `max_limit` (High-Throughput Virtual Timeline)
-Designed to maximize daily scrobble throughput up to the configured safety ceiling (`MAX_DAILY_SCROBBLES`, default 2,750/day) while generating a sequential, non-overlapping virtual playback timeline.
+Designed to maximize daily scrobble throughput up to the configured safety ceiling (`MAX_DAILY_SCROBBLES`, default 2,750/day) while generating a strictly monotonically increasing, non-overlapping virtual playback timeline.
 
 #### Mathematical Timeline Model
 - **Real-Time HTTP Submission Cadence**: In `max_limit` mode, real-time HTTP submissions occur every ~32 seconds (`random.uniform(31.5, 33.0)`).
 - **Virtual Historical Buffer Window**: Virtual track timestamps are anchored in the past, initialized from a 3-day buffer window (`now - 3 days` or loaded from persistent state).
-- **Full Duration Advancement**: Virtual track timestamps advance by each track's full duration plus padding (`duration_sec + 2s padding`), with tracks shorter than 30s clamped to 30s:
+- **Full Duration Advancement & Strict Monotonicity**: Virtual track timestamps advance by each track's full duration plus padding (`duration_sec + 2s padding`), with tracks shorter than 30s clamped to 30s:
   ```text
   timestamp[i+1] = timestamp[i] + max(30, duration_sec) + 2s
   ```
+  The timeline is strictly monotonically increasing ($\text{timestamp}_{n+1} \ge \text{timestamp}_n + \max(30, \text{duration}_n) + 2\text{s}$) and handles catching up to the real-time present without jumping backwards into the past.
 - **Contiguous Virtual History**: By decoupling the physical HTTP submission cadence (~32s) from the virtual playback timeline (`duration_sec + 2s padding`), this produces a contiguous, sequential, non-overlapping listening history on Last.fm without compressing song lengths or generating overlapping playback intervals.
 - **Rolling Quota Enforcement**: Records each submission at actual submission time (`now`) in the rolling 24-hour SQLite ledger, automatically throttling when the count reaches `MAX_DAILY_SCROBBLES` until older timestamps age out.
 
@@ -66,6 +68,7 @@ Designed to maximize daily scrobble throughput up to the configured safety ceili
 
 ```bash
 # On Linux / macOS:
+mkdir -p data && chown -R 1000:1000 data  # Pre-creates data volume for non-root 1000:1000 container user
 docker run --rm -v "${PWD}:/out" ghcr.io/kirbyhacks/scrobbleforge:latest init
 
 # On Windows PowerShell:
@@ -89,7 +92,7 @@ docker compose up -d
 docker compose logs -f
 ```
 
-4. **1-Click Zero-Restart Authorization**:
+4. **One-time browser authorization with persistent session key storage**:
    On first launch, ScrobbleForge displays an authorization link in the container logs:
    ```text
    ======================================================================
@@ -101,7 +104,7 @@ docker compose logs -f
    Waiting for browser approval (checking every 6s, 15m timeout)...
    ======================================================================
    ```
-   Open the link in your browser and click **"Yes, allow access"**. ScrobbleForge automatically detects your approval, saves the permanent key to `data/session.key`, and immediately begins scrobbling — **no restarts needed**.
+   Open the link in your browser and click **"Yes, allow access"**. ScrobbleForge automatically detects your approval, saves the permanent key to `data/session.key`, and immediately begins scrobbling.
 
 ---
 

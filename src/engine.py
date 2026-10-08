@@ -83,6 +83,10 @@ class ScrobblerEngine:
                 cur = int(saved_cursor)
                 two_weeks_ago = now - (13 * 86400)
                 if cur > two_weeks_ago:
+                    if cur > now:
+                        if cur > now + 60:
+                            logger.warning(f"[TIMELINE] persisted cursor {cur} is in the future -> clamped to now")
+                        cur = now
                     self.virtual_timeline_cursor = cur
                     logger.info(f"[TIMELINE] resumed max_limit cursor at timestamp {cur}")
                     return

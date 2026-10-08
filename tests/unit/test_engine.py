@@ -664,6 +664,37 @@ class TestScrobblerEngine(unittest.TestCase):
         # pending_track is cleared
         self.assertIsNone(engine.pending_track)
 
+    def test_future_persisted_cursor_is_clamped_on_startup(self):
+        """A cursor left in the future by an older version must not stall or emit future timestamps."""
+        now = int(time.time())
+        self.tracker.set_state("virtual_timeline_cursor", str(now + int(2.7 * 86400)))
+        cfg = AppConfig(
+            lastfm=LastFMConfig(api_key="k", api_secret="s", username="u"),
+            spotify=SpotifyConfig(),
+            engine=EngineConfig(mode="max_limit", max_daily_scrobbles=2750),
+            system=SystemConfig(data_dir=Path(self.temp_dir.name)),
+        )
+        track = Track(title="Song", artist="Artist", duration_ms=200000)
+        qm = QueueManager(tracks=[track], tracker=self.tracker, shuffle=False, loop=False)
+        stop_event = threading.Event()
+        engine = ScrobblerEngine(
+            config=cfg,
+            lastfm=self.mock_lfm,
+            spotify=None,
+            queue=qm,
+            tracker=self.tracker,
+            stop_event=stop_event,
+        )
+        self.assertLessEqual(engine.virtual_timeline_cursor, int(time.time()))
+
+        waits = []
+        with patch.object(stop_event, "wait", side_effect=lambda timeout=None: waits.append(timeout) or False):
+            engine._execute_max_limit_step(track)
+
+        self.assertEqual(len(self.mock_lfm.scrobbles), 1)
+        self.assertLessEqual(self.mock_lfm.scrobbles[-1][1], int(time.time()))
+        self.assertTrue(all(w < 3600 for w in waits), f"unexpected long wait: {waits}")
+
 
 if __name__ == "__main__":
     unittest.main()

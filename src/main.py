@@ -8,6 +8,7 @@ from pathlib import Path
 # Support running directly as 'python src/main.py' or 'python -m src.main'
 if __package__ is None or __package__ == "":
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+    from src import __version__
     from src.config import load_config
     from src.engine import ScrobblerEngine
     from src.lastfm_client import (
@@ -22,6 +23,7 @@ if __package__ is None or __package__ == "":
     from src.quota_tracker import QuotaTracker
     from src.spotify_client import SpotifyClient, load_local_fallback_tracks
 else:
+    from . import __version__
     from .config import load_config
     from .engine import ScrobblerEngine
     from .lastfm_client import (
@@ -67,6 +69,14 @@ def cmd_init():
         print(f"  + Created: {compose_path.name}")
     else:
         print(f"  - Skipped: {compose_path.name} (already exists)")
+
+    data_dir = out_dir / "data"
+    if not data_dir.exists():
+        try:
+            data_dir.mkdir(parents=True, exist_ok=True)
+            print(f"  + Created: {data_dir.name}/ (data storage directory)")
+        except Exception:
+            pass
 
     src_example = Path(".env.example")
     content = ""
@@ -129,7 +139,7 @@ def main():
     setup_logging(config.system.log_level)
     logger = logging.getLogger("scrobbler.main")
 
-    logger.info("Initializing ScrobbleForge v1.0.0...")
+    logger.info(f"Initializing ScrobbleForge v{__version__}...")
 
     stop_event = threading.Event()
 
@@ -234,6 +244,7 @@ def main():
             client_id=config.spotify.client_id,
             client_secret=config.spotify.client_secret,
             cache_path=cache_file,
+            ttl_hours=config.spotify.refresh_interval_hours,
         )
         try:
             tracks = spotify_client.fetch_sources(config.spotify.sources, use_cache_if_available=True)

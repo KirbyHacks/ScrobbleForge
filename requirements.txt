@@ -1,3 +1,4 @@
-pylast>=5.3.0
+# Pinned: LastFMClient calls private pylast._Request to inspect response XML for ignored scrobbles
+pylast==7.2.0
 python-dotenv>=1.0.1
 requests>=2.31.0

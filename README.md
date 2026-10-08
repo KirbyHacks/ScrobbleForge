@@ -1,6 +1,6 @@
 # ScrobbleForge
 
-A resilient, background-oriented Last.fm scrobbler designed for continuous, unattended execution. Ingests full Spotify playlists, complete albums, and single tracks (for obsession farming) without requiring Spotify Premium or developer credentials, featuring realistic playback simulation and anti-ban pacing up to Last.fm's daily limits.
+A resilient, background-oriented Last.fm scrobbler designed for continuous, unattended execution. Ingests full Spotify playlists, complete albums, and single tracks (for obsession farming) without requiring Spotify Premium or developer credentials, featuring realistic playback simulation, non-overlapping historical timeline synthesis, and configurable rolling 24-hour rate limiting.
 
 ---
 
@@ -12,29 +12,47 @@ Most open-source Last.fm auto-scrobblers share the same limitations:
 |---|---|---|
 | **Playlists, Albums & Single Tracks** | ❌ Hardcoded to single static track loops | ✅ Full playlists, complete albums, and single obsession tracks |
 | **Free Spotify Accounts** | ❌ Blocked by Spotify Web API paywall | ✅ Zero-credential public resolution (No Premium needed) |
-| **Anti-Ban Pacing** | ❌ Naive real-time flooding (overlapping tracks) | ✅ Non-overlapping sequential historical backdating |
-| **Rolling 24h Quota Guard** | ❌ None or midnight resets (causes HTTP 429) | ✅ Exact rolling 24-hour SQLite ledger with auto-pause/resume |
+| **Playback Timeline Synthesis** | ❌ Naive real-time flooding (concurrent playback collisions) | ✅ Non-overlapping historical timeline synthesis (prevents concurrent playback collisions) |
+| **Rolling 24h Quota Guard** | ❌ None or midnight resets (causes HTTP 429) | ✅ Rolling 24-hour persistent SQLite ledger with auto-pause/resume |
 | **Two-Factor Authentication (2FA)** | ❌ Broken with deprecated password hashing | ✅ Permanent session key authorization (`auth_helper.py`) |
 | **Production Docker Readiness** | ❌ Blocking `time.sleep()` hangs on `SIGTERM` | ✅ Non-root (`1000:1000`), persistent WAL SQLite, signal-safe |
 
 ---
 
+## Core Technical Mechanisms & System Guarantees
+
+ScrobbleForge replaces subjective claims with explicit, software-controlled mechanisms:
+
+- **Non-overlapping historical timeline synthesis (prevents concurrent playback collisions)**: Generates sequential track start times respecting authentic track runtimes, ensuring no two tracks ever occupy overlapping time slices in scrobble history.
+- **Rolling 24-hour persistent SQLite ledger with auto-pause/resume**: Records submission timestamps in an ACID-compliant SQLite ledger using an exact 24-hour sliding window, automatically pausing when quotas approach limits and resuming as older entries age out.
+- **Configurable daily safety ceiling (default: 2,750/day buffer against Last.fm's ~2,800 limit)**: Enforces an intentional buffer below Last.fm's ~2,800 daily submission ceiling to prevent HTTP 429 rate-limiting.
+- **Authentic track duration modeling with Last.fm 30-second submission clamping**: Models true track runtimes from source metadata while strictly clamping minimum scrobble duration to 30 seconds per Last.fm API submission rules.
+
+---
+
 ## Operating Modes
 
-### 1. `realistic` (Humanly Possible)
+### 1. `realistic` (Real-Time Playback Emulation)
 - Simulates real-time listening behavior.
 - Broadcasts `track.updateNowPlaying` to Last.fm immediately so profiles show active playback.
 - Submits `track.scrobble` at the 50% / 4-minute mark per official Last.fm rules.
 - Adds randomized inter-track pauses (1 to 4 seconds).
-- Yields ~300 to 500 scrobbles per day, identical to genuine listening.
+- Yields ~300 to 500 scrobbles per day, paced strictly by actual track durations.
 
-### 2. `max_limit` (2,800 Safe Daily Pacing)
-- Paced at ~32-second intervals to safely approach Last.fm's ~2,800 daily limit.
-- Maintains a continuous, non-overlapping historical playback timeline to prevent account flags.
-- Enforces an internal safety ceiling of 2,750 scrobbles per rolling 24 hours, automatically throttling until older timestamps age out.
+### 2. `max_limit` (High-Throughput Virtual Timeline)
+Designed to maximize daily scrobble throughput up to the configured safety ceiling (`MAX_DAILY_SCROBBLES`, default 2,750/day) while preserving contiguous listening history without collisions.
 
-### 3. `custom_interval`
-- Submits scrobbles at a fixed user-defined interval in seconds while still enforcing rolling 24-hour safety caps.
+#### Mathematical Timeline Model
+- **Real-Time HTTP Submission Cadence**: In `max_limit` mode, real-time HTTP submissions occur every ~32 seconds (`random.uniform(31.5, 33.0)`).
+- **Virtual Historical Buffer Window**: Virtual track timestamps are anchored in the past, initialized from a 3-day buffer window (`now - 3 days` or loaded from persistent state).
+- **Full Duration Advancement**: Virtual track timestamps advance by each track's full duration plus padding (`duration_sec + 2s padding`), with tracks shorter than 30s clamped to 30s:
+  $$\text{timestamp}_{i+1} = \text{timestamp}_i + \max(30, \text{duration\_sec}) + 2\text{s}$$
+- **Contiguous History Without Collisions**: By decoupling the physical HTTP submission cadence (~32s) from the virtual playback timeline (`duration_sec + 2s padding`), this produces a contiguous, sequential, non-overlapping listening history on Last.fm without compressing song lengths or causing simultaneous playback flags.
+- **Rolling Quota Enforcement**: Records each submission at actual submission time (`now`) in the rolling 24-hour SQLite ledger, automatically throttling when the count reaches `MAX_DAILY_SCROBBLES` until older timestamps age out.
+
+### 3. `custom_interval` (Fixed Interval Submission)
+- Submits scrobbles at a fixed user-defined interval in seconds (`CUSTOM_INTERVAL_SECONDS`, default 60s).
+- Submissions use the current timestamp while continuing to enforce the rolling 24-hour safety ceiling.
 
 ---
 
@@ -111,7 +129,7 @@ Settings can be specified in `.env` or passed directly as Docker environment var
 | `SPOTIFY_PLAYLIST_URL` | *(required)* | Spotify playlist, album, or single track URL. Comma-separate for multiple sources |
 | `SCROBBLE_MODE` | `realistic` | Pacing mode: `realistic`, `max_limit`, or `custom_interval` |
 | `CUSTOM_INTERVAL_SECONDS` | `60` | Delay in seconds when `SCROBBLE_MODE=custom_interval` |
-| `MAX_DAILY_SCROBBLES` | `2750` | Rolling 24-hour safety ceiling (Last.fm hard limit: 2,800) |
+| `MAX_DAILY_SCROBBLES` | `2750` | Configurable daily safety ceiling (buffer against Last.fm's ~2,800 limit) |
 | `SHUFFLE` | `true` | Randomizes the playback queue on each pass |
 | `LOOP` | `true` | Repeats queue infinitely for continuous background scrobbling |
 | `UPDATE_NOW_PLAYING` | `true` | Broadcasts "Now Playing" in `realistic` mode |
@@ -154,9 +172,13 @@ If a Spotify URL is unavailable or local metadata is preferred, ScrobbleForge au
 
 ## Test Suite
 
-ScrobbleForge includes a comprehensive unit test suite covering duration models, rolling quota mathematics, queue management, and non-overlapping timeline pacing:
+ScrobbleForge includes an isolated unit test suite covering duration models, rolling quota mathematics, queue management, and non-overlapping timeline pacing:
 
 ```bash
+# Run isolated unit tests:
+python -m unittest discover -s tests/unit
+
+# Or via backward-compatible test runner:
 python tests/test_suite.py
 ```
 

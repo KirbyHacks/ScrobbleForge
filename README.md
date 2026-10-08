@@ -46,7 +46,9 @@ Designed to maximize daily scrobble throughput up to the configured safety ceili
 - **Real-Time HTTP Submission Cadence**: In `max_limit` mode, real-time HTTP submissions occur every ~32 seconds (`random.uniform(31.5, 33.0)`).
 - **Virtual Historical Buffer Window**: Virtual track timestamps are anchored in the past, initialized from a 3-day buffer window (`now - 3 days` or loaded from persistent state).
 - **Full Duration Advancement**: Virtual track timestamps advance by each track's full duration plus padding (`duration_sec + 2s padding`), with tracks shorter than 30s clamped to 30s:
-   $$\text{timestamp}_{i+1} = \text{timestamp}_i + \max(30, \text{duration\_sec}) + 2\text{s}$$
+  ```text
+  timestamp[i+1] = timestamp[i] + max(30, duration_sec) + 2s
+  ```
 - **Contiguous History Without Collisions**: By decoupling the physical HTTP submission cadence (~32s) from the virtual playback timeline (`duration_sec + 2s padding`), this produces a contiguous, sequential, non-overlapping listening history on Last.fm without compressing song lengths or causing simultaneous playback flags.
 - **Rolling Quota Enforcement**: Records each submission at actual submission time (`now`) in the rolling 24-hour SQLite ledger, automatically throttling when the count reaches `MAX_DAILY_SCROBBLES` until older timestamps age out.
 

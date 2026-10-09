@@ -51,6 +51,36 @@ class TestScrobblerEngine(unittest.TestCase):
     def tearDown(self):
         self.temp_dir.cleanup()
 
+    def test_transient_scrobble_response_error_keeps_track_uncommitted(self):
+        """A malformed/ambiguous Last.fm response must not commit the queue position."""
+        cfg = AppConfig(
+            lastfm=LastFMConfig(api_key="k", api_secret="s", username="u"),
+            spotify=SpotifyConfig(),
+            engine=EngineConfig(mode="custom_interval", max_daily_scrobbles=2750, custom_interval_seconds=0),
+            system=SystemConfig(data_dir=Path(self.temp_dir.name)),
+        )
+        track = Track(title="Retry me", artist="Artist", duration_ms=180000)
+        queue = QueueManager(tracks=[track], tracker=self.tracker, shuffle=False, loop=False)
+        self.tracker.set_state("queue_index", "0")
+        lastfm = MagicMock()
+        lastfm.scrobble.side_effect = LastFMTemporaryError("malformed response")
+        stop_event = threading.Event()
+
+        def stop_on_backoff(*args, **kwargs):
+            stop_event.set()
+            return True
+
+        with patch.object(stop_event, "wait", side_effect=stop_on_backoff):
+            engine = ScrobblerEngine(
+                config=cfg, lastfm=lastfm, spotify=None, queue=queue,
+                tracker=self.tracker, stop_event=stop_event,
+            )
+            engine.run()
+
+        self.assertIs(engine.pending_track, track)
+        self.assertEqual(self.tracker.get_state("queue_index"), "0")
+        self.assertEqual(queue.current_index, 1)  # in-memory pointer advanced, but not persisted
+
     def test_max_limit_timeline_advancement(self):
         cfg = AppConfig(
             lastfm=LastFMConfig(api_key="k", api_secret="s", username="u"),
@@ -264,7 +294,9 @@ class TestScrobblerEngine(unittest.TestCase):
     def test_lastfm_client_scrobble_and_now_playing_enforces_30s_clamp(self, mock_request_cls):
         """Verifies that LastFMClient passes max(30, duration_sec) to Last.fm calls."""
         mock_req_inst = MagicMock()
-        mock_req_inst.execute.return_value = minidom.parseString('<ignoredMessage code="0"/>')
+        mock_req_inst.execute.return_value = minidom.parseString(
+            '<scrobbles accepted="1" ignored="0"><scrobble><ignoredMessage code="0"/></scrobble></scrobbles>'
+        )
         mock_request_cls.return_value = mock_req_inst
 
         client = LastFMClient.__new__(LastFMClient)
@@ -516,6 +548,34 @@ class TestScrobblerEngine(unittest.TestCase):
         mock_execute.return_value = xml_ok
         success_ok = client.scrobble(track, timestamp=1700000000)
         self.assertTrue(success_ok)
+
+    @patch("pylast._Request.execute")
+    def test_lastfm_client_scrobble_none_doc_raises_temporary_error(self, mock_execute):
+        """Verifies that LastFMClient raises LastFMTemporaryError when response doc is None."""
+        client = LastFMClient.__new__(LastFMClient)
+        client.network = MagicMock()
+        client.network._get_ws_auth.return_value = ("api_key", "api_secret", "session_key")
+        client.network.is_caching_enabled.return_value = False
+        track = Track(title="Test Track", artist="Artist", duration_ms=180000)
+
+        mock_execute.return_value = None
+        with self.assertRaises(LastFMTemporaryError):
+            client.scrobble(track, timestamp=1700000000)
+
+    @patch("pylast._Request.execute")
+    def test_lastfm_client_scrobble_missing_scrobbles_tag_raises_temporary_error(self, mock_execute):
+        """Verifies that LastFMClient raises LastFMTemporaryError when <scrobbles> tag is missing."""
+        client = LastFMClient.__new__(LastFMClient)
+        client.network = MagicMock()
+        client.network._get_ws_auth.return_value = ("api_key", "api_secret", "session_key")
+        client.network.is_caching_enabled.return_value = False
+        track = Track(title="Test Track", artist="Artist", duration_ms=180000)
+
+        xml_missing = minidom.parseString('<lfm status="ok"><other/></lfm>')
+        mock_execute.return_value = xml_missing
+        with self.assertRaises(LastFMTemporaryError) as ctx:
+            client.scrobble(track, timestamp=1700000000)
+        self.assertIn("missing <scrobbles> tag", str(ctx.exception))
 
     def test_fatal_auth_error_exits_with_status_1(self):
         """Verifies that LastFMAuthError halts the process with non-zero exit code (sys.exit(1))."""

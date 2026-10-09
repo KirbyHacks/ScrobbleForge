@@ -139,19 +139,36 @@ class LastFMClient:
         else:
             raise LastFMAuthError("LASTFM_SESSION_KEY required. Run 'python auth_helper.py' to generate one.")
 
+        self._verify_session_validity()
+
+    def _verify_session_validity(self):
+        """Verifies session validity fail-fast by testing get_authenticated_user()."""
         try:
             user = self.network.get_authenticated_user()
-            if user:
+            if user is None:
+                raise LastFMAuthError("Invalid session: No authenticated user returned.")
+            try:
                 auto_name = user.get_name()
                 if not self.username and auto_name:
                     self.username = auto_name
                 logger.info(f"Verified Last.fm session for user: '{self.username or auto_name or 'authenticated'}'")
+            except pylast.WSError:
+                raise
+            except (pylast.NetworkError, pylast.MalformedResponseError, ConnectionError, TimeoutError, OSError):
+                raise
+            except Exception as e:
+                logger.warning(f"Could not retrieve Last.fm username: {e}")
         except pylast.WSError as e:
-            if "Invalid session" in str(e) or e.status == "9":
-                raise LastFMAuthError(f"Session key invalid or expired: {e.details}") from e
+            status = str(getattr(e, "status", ""))
+            details = str(getattr(e, "details", str(e)))
+            if status in ("4", "9", "10") or "invalid session" in str(e).lower() or "invalid session" in details.lower():
+                raise LastFMAuthError(f"Last.fm authentication failed ({status or 'unknown'}): {details}") from e
+            if status in ("11", "16", "26", "29"):
+                raise LastFMTemporaryError(f"Last.fm service temporary error ({status}): {details}") from e
+            # Do not disguise protocol/configuration errors as connectivity failures.
             raise
-        except Exception as e:
-            logger.warning(f"Could not verify Last.fm user session at startup: {e}")
+        except (pylast.NetworkError, pylast.MalformedResponseError, ConnectionError, TimeoutError, OSError) as e:
+            raise LastFMTemporaryError(f"Network error during session verification: {e}") from e
 
     def update_now_playing(self, track: Track) -> bool:
         """Sends track.updateNowPlaying to Last.fm."""
@@ -197,21 +214,25 @@ class LastFMClient:
 
         try:
             doc = pylast._Request(self.network, "track.scrobble", params).execute()
+            if doc is None:
+                raise LastFMTemporaryError("Empty XML response received from Last.fm.")
 
             # Check <scrobbles ignored="N">
             scrobbles_nodes = doc.getElementsByTagName("scrobbles")
-            if scrobbles_nodes:
-                ignored_count = scrobbles_nodes[0].getAttribute("ignored")
-                if ignored_count and ignored_count != "0":
-                    msg_nodes = doc.getElementsByTagName("ignoredMessage")
-                    code = msg_nodes[0].getAttribute("code") if msg_nodes else "unknown"
-                    message = (
-                        msg_nodes[0].firstChild.nodeValue
-                        if (msg_nodes and msg_nodes[0].firstChild and hasattr(msg_nodes[0].firstChild, "nodeValue"))
-                        else ""
-                    )
-                    logger.warning(f"[IGNORED SCROBBLE] code {code}: {message}")
-                    return False
+            if not scrobbles_nodes:
+                raise LastFMTemporaryError("[SCROBBLE] Malformed response: missing <scrobbles> tag")
+
+            ignored_count = scrobbles_nodes[0].getAttribute("ignored")
+            if ignored_count and ignored_count != "0":
+                msg_nodes = doc.getElementsByTagName("ignoredMessage")
+                code = msg_nodes[0].getAttribute("code") if msg_nodes else "unknown"
+                message = (
+                    msg_nodes[0].firstChild.nodeValue
+                    if (msg_nodes and msg_nodes[0].firstChild and hasattr(msg_nodes[0].firstChild, "nodeValue"))
+                    else ""
+                )
+                logger.warning(f"[IGNORED SCROBBLE] code {code}: {message}")
+                return False
 
             # Check <ignoredMessage code="...">
             msg_nodes = doc.getElementsByTagName("ignoredMessage")

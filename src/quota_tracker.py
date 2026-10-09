@@ -82,20 +82,22 @@ class QuotaTracker:
         if count < max_daily_limit:
             return True, 0
 
-        # Calculate exact seconds until oldest scrobbles in window age past 24 hours
+        # Because admission requires count < limit, enough rows must expire to
+        # bring the count strictly below the limit (not merely down to it).
         cutoff = current_time - 86400
-        excess = (count - max_daily_limit) + 1
-        with self._connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute(
-                "SELECT timestamp FROM scrobbles WHERE timestamp >= ? ORDER BY timestamp ASC LIMIT ?",
-                (cutoff, excess)
-            )
-            rows = cursor.fetchall()
-            if rows:
-                oldest_in_excess = rows[-1][0]
-                wait_seconds = max(1, (oldest_in_excess + 86400) - current_time)
-                return False, wait_seconds
+        rows_to_expire = count - max_daily_limit + 1
+        if rows_to_expire > 0:
+            with self._connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    "SELECT timestamp FROM scrobbles WHERE timestamp >= ? ORDER BY timestamp ASC, id ASC LIMIT ?",
+                    (cutoff, rows_to_expire)
+                )
+                rows = cursor.fetchall()
+                if len(rows) >= rows_to_expire:
+                    oldest_to_expire = rows[rows_to_expire - 1][0]
+                    wait_seconds = max(1, (oldest_to_expire + 86400) - current_time)
+                    return False, wait_seconds
 
         return False, 60
 

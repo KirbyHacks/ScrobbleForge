@@ -21,6 +21,8 @@ from src.lastfm_client import (
     poll_web_auth,
     LastFMAuthCancelledError,
     LastFMAuthTimeoutError,
+    LastFMAuthError,
+    LastFMTemporaryError,
 )
 
 
@@ -134,10 +136,81 @@ class TestAuthResolution(unittest.TestCase):
         self.assertEqual(client.username, "autodetected_user")
 
     @patch("pylast.LastFMNetwork")
-    def test_client_initialization_with_username_none_and_no_user_detected_stays_none(self, mock_network_cls):
-        """Verifies that LastFMClient stays username=None if authenticated user lookup returns None without error."""
+    def test_client_initialization_with_none_user_raises_auth_error(self, mock_network_cls):
+        """Verifies that LastFMClient raises LastFMAuthError if authenticated user lookup returns None."""
         mock_network = MagicMock()
         mock_network.get_authenticated_user.return_value = None
+        mock_network_cls.return_value = mock_network
+
+        with self.assertRaises(LastFMAuthError):
+            LastFMClient(
+                api_key="valid_key",
+                api_secret="valid_secret",
+                username=None,
+                session_key="valid_session_key",
+            )
+
+    @patch("pylast.LastFMNetwork")
+    def test_client_initialization_with_invalid_session_error_raises_auth_error(self, mock_network_cls):
+        """Verifies that LastFMClient raises LastFMAuthError on initialization if network throws code 9 WSError."""
+        mock_network = MagicMock()
+        err9 = pylast.WSError(network=None, status="9", details="Invalid session key - Please re-authenticate")
+        mock_network.get_authenticated_user.side_effect = err9
+        mock_network_cls.return_value = mock_network
+
+        with self.assertRaises(LastFMAuthError) as ctx:
+            LastFMClient(
+                api_key="valid_key",
+                api_secret="valid_secret",
+                username="test_user",
+                session_key="invalid_session_key",
+            )
+        self.assertIn("Invalid session", str(ctx.exception))
+
+    @patch("pylast.LastFMNetwork")
+    def test_client_initialization_with_network_error_raises_temporary_error(self, mock_network_cls):
+        """Verifies that network errors during session verification raise LastFMTemporaryError instead of LastFMAuthError."""
+        mock_network = MagicMock()
+        mock_network.get_authenticated_user.side_effect = pylast.NetworkError(
+            None, Exception("Connection timed out")
+        )
+        mock_network_cls.return_value = mock_network
+
+        with self.assertRaises(LastFMTemporaryError):
+            LastFMClient(
+                api_key="valid_key",
+                api_secret="valid_secret",
+                username="test_user",
+                session_key="valid_session_key",
+            )
+
+    @patch("pylast.LastFMNetwork")
+    def test_client_initialization_treats_auth_failed_as_auth_error(self, mock_network_cls):
+        mock_network = MagicMock()
+        mock_network.get_authenticated_user.side_effect = pylast.WSError(
+            network=None, status="4", details="Authentication failed"
+        )
+        mock_network_cls.return_value = mock_network
+        with self.assertRaises(LastFMAuthError):
+            LastFMClient(api_key="k", api_secret="s", username="u", session_key="bad")
+
+    @patch("pylast.LastFMNetwork")
+    def test_client_initialization_does_not_relabel_unexpected_ws_error_as_temporary(self, mock_network_cls):
+        mock_network = MagicMock()
+        unexpected = pylast.WSError(network=None, status="3", details="Invalid method")
+        mock_network.get_authenticated_user.side_effect = unexpected
+        mock_network_cls.return_value = mock_network
+        with self.assertRaises(pylast.WSError) as ctx:
+            LastFMClient(api_key="k", api_secret="s", username="u", session_key="key")
+        self.assertEqual(str(ctx.exception.status), "3")
+
+    @patch("pylast.LastFMNetwork")
+    def test_client_initialization_with_username_none_and_empty_user_name_stays_none(self, mock_network_cls):
+        """Verifies that LastFMClient stays username=None if authenticated user has no name returned."""
+        mock_network = MagicMock()
+        mock_user = MagicMock()
+        mock_user.get_name.return_value = None
+        mock_network.get_authenticated_user.return_value = mock_user
         mock_network_cls.return_value = mock_network
 
         client = LastFMClient(

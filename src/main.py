@@ -16,6 +16,7 @@ if __package__ is None or __package__ == "":
         LastFMAuthError,
         LastFMAuthTimeoutError,
         LastFMAuthCancelledError,
+        LastFMTemporaryError,
         initiate_web_auth,
         poll_web_auth,
     )
@@ -31,6 +32,7 @@ else:
         LastFMAuthError,
         LastFMAuthTimeoutError,
         LastFMAuthCancelledError,
+        LastFMTemporaryError,
         initiate_web_auth,
         poll_web_auth,
     )
@@ -288,6 +290,9 @@ def main():
         )
     except LastFMAuthError as e:
         logger.error(f"Last.fm authentication error: {e}")
+        sys.exit(1)
+    except LastFMTemporaryError as e:
+        logger.error(f"Last.fm session verification failed (network error, retry later): {e}")
         sys.exit(1)
 
     # Setup queue manager

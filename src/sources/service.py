@@ -22,8 +22,8 @@ class SourceIngestionService:
         ttl_hours: float = 12.0,
         spotify_client: Optional[SpotifyClient] = None,
     ):
+        self._spotify_client = spotify_client
         if spotify_client is not None:
-            self._spotify_client = spotify_client
             self.client_id = spotify_client.client_id
             self.client_secret = spotify_client.client_secret
             self.cache_path = spotify_client.cache_path
@@ -33,16 +33,17 @@ class SourceIngestionService:
             self.client_secret = client_secret
             self.cache_path = Path(cache_path) if cache_path else None
             self.ttl_hours = float(ttl_hours)
-            self._spotify_client = SpotifyClient(
-                client_id=client_id,
-                client_secret=client_secret,
-                cache_path=self.cache_path,
-                ttl_hours=self.ttl_hours,
-            )
 
     @property
     def spotify_client(self) -> SpotifyClient:
-        """underlying SpotifyClient instance for compatibility inspection."""
+        """underlying SpotifyClient instance for compatibility inspection (lazily initialized)."""
+        if self._spotify_client is None:
+            self._spotify_client = SpotifyClient(
+                client_id=self.client_id,
+                client_secret=self.client_secret,
+                cache_path=self.cache_path,
+                ttl_hours=self.ttl_hours,
+            )
         return self._spotify_client
 
     def fetch_sources(
@@ -58,15 +59,16 @@ class SourceIngestionService:
         if not sources:
             return []
 
-        client_kwargs = {
-            "client": self._spotify_client,
-        }
+        has_spotify = any(SourceFactory.detect_source_type(s) == "spotify" for s in sources)
+        provider_kwargs = {}
+        if has_spotify or self._spotify_client is not None:
+            provider_kwargs["spotify"] = {"client": self.spotify_client}
 
         canonical_tracks = SourceFactory.fetch_all_sources(
             sources=sources,
             use_cache_if_available=use_cache_if_available,
             allow_partial=False,
-            **client_kwargs,
+            provider_kwargs=provider_kwargs,
         )
 
         legacy_tracks: List[Track] = []

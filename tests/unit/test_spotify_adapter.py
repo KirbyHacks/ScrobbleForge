@@ -177,6 +177,38 @@ class TestSpotifyAdapter(unittest.TestCase):
         with self.assertRaises(SourceTemporaryError):
             self.adapter.fetch_sources(urls)
 
+    def test_fetch_sources_wrapped_auth_failure_classification(self):
+        mock_resp = MagicMock()
+        mock_resp.status_code = 403
+        http_err = requests.exceptions.HTTPError(response=mock_resp)
+        wrapped_err = SpotifyIngestionError("Failed to access Spotify embed")
+        wrapped_err.__cause__ = http_err
+
+        self.mock_client.fetch_sources.side_effect = wrapped_err
+
+        urls = ["https://open.spotify.com/playlist/37i9dQZF1DXcBWIGoYBM5M"]
+        with self.assertRaises(SourceAuthError) as ctx:
+            self.adapter.fetch_sources(urls)
+        self.assertEqual(ctx.exception.status_code, 403)
+        self.assertIs(ctx.exception.__cause__, wrapped_err)
+
+    def test_fetch_sources_wrapped_rate_limit_429_with_retry_after(self):
+        mock_resp = MagicMock()
+        mock_resp.status_code = 429
+        mock_resp.headers = {"Retry-After": "45"}
+        http_err = requests.exceptions.HTTPError(response=mock_resp)
+        wrapped_err = SpotifyIngestionError("Spotify rate limited")
+        wrapped_err.__cause__ = http_err
+
+        self.mock_client.fetch_sources.side_effect = wrapped_err
+
+        urls = ["https://open.spotify.com/playlist/37i9dQZF1DXcBWIGoYBM5M"]
+        with self.assertRaises(SourceTemporaryError) as ctx:
+            self.adapter.fetch_sources(urls)
+        self.assertEqual(ctx.exception.status_code, 429)
+        self.assertEqual(ctx.exception.retry_after, 45)
+        self.assertIs(ctx.exception.__cause__, wrapped_err)
+
     def test_fetch_sources_unexpected_exception_classification(self):
         self.mock_client.fetch_sources.side_effect = KeyError("corrupted_internal_key")
 

@@ -14,7 +14,7 @@ from src.config import AppConfig, ConfigError, load_config
 class TestConfigValidation(unittest.TestCase):
     def setUp(self):
         # clean environment copy for isolated testing
-        self.orig_env = os.environ.copy()
+        self.orig_env = {k: v for k, v in os.environ.items() if len(v) < 32000}
 
     def tearDown(self):
         os.environ.clear()

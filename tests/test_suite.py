@@ -1,4 +1,10 @@
-"""runner for test_suite.py delegating to tests/unit."""
+"""runner for test_suite.py delegating to tests/unit.
+
+test runner scope note:
+- python tests/test_suite.py executes tests/unit (legacy unittest regression suite).
+- to run the complete test suite including provider contract tests (tests/contracts),
+  execute: python -m pytest -v
+"""
 import sys
 from pathlib import Path
 import unittest

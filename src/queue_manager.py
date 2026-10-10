@@ -14,7 +14,8 @@ def _track_identifier(track: Track) -> str:
     """returns a unique identifier string for a track."""
     if track.spotify_id:
         return f"spotify:{track.spotify_id}"
-    return f"{track.artist.strip()}::{track.title.strip()}::{track.album.strip()}::{track.track_number}::{track.duration_ms}"
+    provider_prefix = f"{track.provider_id}::" if getattr(track, "provider_id", None) else ""
+    return f"{provider_prefix}{track.artist.strip()}::{track.title.strip()}::{track.album.strip()}::{track.track_number}::{track.duration_ms}"
 
 
 def _compute_source_hash(tracks: List[Track]) -> str:

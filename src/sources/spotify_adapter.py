@@ -19,6 +19,7 @@ from .exceptions import (
     SourceError,
     SourceTemporaryError,
     UnsupportedSourceError,
+    extract_http_metadata,
 )
 
 logger = logging.getLogger("scrobbler.sources.spotify")
@@ -198,12 +199,31 @@ class SpotifyAdapter(SourceClient):
                 urls,
                 use_cache_if_available=use_cache_if_available,
             )
-        except requests.exceptions.HTTPError as exc:
-            status_code = getattr(getattr(exc, "response", None), "status_code", None)
+        except (
+            requests.exceptions.HTTPError,
+            SpotifyIngestionError,
+            requests.RequestException,
+            ConnectionError,
+            TimeoutError,
+        ) as exc:
+            status_code, retry_after = extract_http_metadata(exc)
             if status_code in (401, 403):
-                raise SourceAuthError(f"Spotify authentication failed: {exc}") from exc
-            raise SourceTemporaryError(f"Spotify HTTP failure ({status_code}): {exc}") from exc
-        except (SpotifyIngestionError, requests.RequestException, ConnectionError, TimeoutError) as exc:
+                raise SourceAuthError(
+                    f"Spotify authentication failed: {exc}",
+                    status_code=status_code,
+                ) from exc
+            if status_code == 429:
+                raise SourceTemporaryError(
+                    f"Spotify rate limit exceeded (429): {exc}",
+                    status_code=429,
+                    retry_after=retry_after,
+                ) from exc
+            if status_code is not None:
+                raise SourceTemporaryError(
+                    f"Spotify HTTP failure ({status_code}): {exc}",
+                    status_code=status_code,
+                    retry_after=retry_after,
+                ) from exc
             raise SourceTemporaryError(f"Spotify temporary ingestion failure: {exc}") from exc
         except Exception as exc:
             if isinstance(exc, SourceError):

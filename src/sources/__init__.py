@@ -5,6 +5,7 @@ from .exceptions import (
     SourceError,
     SourceTemporaryError,
     UnsupportedSourceError,
+    extract_http_metadata,
 )
 from .service import SourceIngestionService
 from .source_factory import FetchReport, SourceFactory
@@ -20,4 +21,5 @@ __all__ = [
     "UnsupportedSourceError",
     "SourceAuthError",
     "SourceTemporaryError",
+    "extract_http_metadata",
 ]

@@ -100,6 +100,14 @@ def _clean_credential(val: Optional[str]) -> Optional[str]:
     return s
 
 
+def _parse_source_references(raw: Optional[str]) -> List[str]:
+    """parse comma-separated source references, trimming whitespace and preserving entry order and repeated references."""
+    if raw is None or not str(raw).strip():
+        return []
+    items = str(raw).split(",")
+    return [item.strip() for item in items if item.strip()]
+
+
 @dataclass
 class LastFMConfig:
     api_key: Optional[str] = None
@@ -107,6 +115,14 @@ class LastFMConfig:
     username: Optional[str] = None
     session_key: Optional[str] = None
     password: Optional[str] = None
+
+
+@dataclass
+class SourceConfig:
+    """provider-independent source configuration."""
+    sources: List[str] = field(default_factory=list)
+    refresh_interval_hours: float = 12.0
+    provider_options: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -139,8 +155,19 @@ class SystemConfig:
 class AppConfig:
     lastfm: LastFMConfig
     spotify: SpotifyConfig
+    sources: SourceConfig = field(default_factory=SourceConfig)
     engine: EngineConfig = field(default_factory=EngineConfig)
     system: SystemConfig = field(default_factory=SystemConfig)
+
+    def __post_init__(self):
+        # backward compatibility: if legacy caller provided spotify.sources
+        # and omitted generic sources, initialize sources from spotify.sources.
+        if not self.sources.sources and self.spotify.sources:
+            self.sources.sources = list(self.spotify.sources)
+
+        # sync refresh interval from legacy spotify if generic was left at default
+        if self.sources.refresh_interval_hours == 12.0 and self.spotify.refresh_interval_hours != 12.0:
+            self.sources.refresh_interval_hours = self.spotify.refresh_interval_hours
 
     @classmethod
     def from_env(cls, env_path: Optional[str] = None) -> "AppConfig":
@@ -181,20 +208,64 @@ class AppConfig:
             password=_clean_credential(os.getenv("LASTFM_PASSWORD")),
         )
 
-        # spotify configuration
-        raw_sources = os.getenv("SPOTIFY_TRACK_URL") or os.getenv("SPOTIFY_PLAYLIST_URL") or os.getenv("SPOTIFY_URL", "")
-        sources = [s.strip() for s in raw_sources.split(",") if s.strip()]
-        refresh_hours = _parse_float(
+        # refresh interval precedence:
+        # SOURCES_REFRESH_INTERVAL_HOURS -> SPOTIFY_REFRESH_INTERVAL_HOURS -> default 12.0
+        spotify_refresh_raw = os.getenv("SPOTIFY_REFRESH_INTERVAL_HOURS")
+        sources_refresh_raw = os.getenv("SOURCES_REFRESH_INTERVAL_HOURS")
+
+        spotify_refresh_hours = _parse_float(
             "SPOTIFY_REFRESH_INTERVAL_HOURS",
-            os.getenv("SPOTIFY_REFRESH_INTERVAL_HOURS"),
+            spotify_refresh_raw,
             default=12.0,
             strictly_positive=True,
         )
+
+        if sources_refresh_raw is not None and str(sources_refresh_raw).strip():
+            sources_refresh_hours = _parse_float(
+                "SOURCES_REFRESH_INTERVAL_HOURS",
+                sources_refresh_raw,
+                default=spotify_refresh_hours,
+                strictly_positive=True,
+            )
+        else:
+            sources_refresh_hours = spotify_refresh_hours
+
+        # if legacy spotify refresh was omitted but generic was set, sync to spotify config
+        if (spotify_refresh_raw is None or not str(spotify_refresh_raw).strip()) and (
+            sources_refresh_raw is not None and str(sources_refresh_raw).strip()
+        ):
+            spotify_effective_refresh = sources_refresh_hours
+        else:
+            spotify_effective_refresh = spotify_refresh_hours
+
+        # source references precedence:
+        # 1. MUSIC_SOURCES (generic provider-independent source list)
+        # 2. Legacy Spotify variables: SPOTIFY_TRACK_URL -> SPOTIFY_PLAYLIST_URL -> SPOTIFY_URL
+        raw_generic = os.getenv("MUSIC_SOURCES")
+        if raw_generic is not None and str(raw_generic).strip():
+            sources = _parse_source_references(raw_generic)
+            # generic source list is provider-independent; do not contaminate spotify.sources
+            spotify_sources = []
+        else:
+            raw_legacy = (
+                os.getenv("SPOTIFY_TRACK_URL")
+                or os.getenv("SPOTIFY_PLAYLIST_URL")
+                or os.getenv("SPOTIFY_URL", "")
+            )
+            sources = _parse_source_references(raw_legacy)
+            # in legacy mode, sources are specifically Spotify sources
+            spotify_sources = list(sources)
+
         spotify_cfg = SpotifyConfig(
-            sources=sources,
+            sources=spotify_sources,
             client_id=_clean_credential(os.getenv("SPOTIFY_CLIENT_ID")),
             client_secret=_clean_credential(os.getenv("SPOTIFY_CLIENT_SECRET")),
-            refresh_interval_hours=refresh_hours,
+            refresh_interval_hours=spotify_effective_refresh,
+        )
+
+        sources_cfg = SourceConfig(
+            sources=list(sources),
+            refresh_interval_hours=sources_refresh_hours,
         )
 
         # engine settings validation
@@ -256,6 +327,7 @@ class AppConfig:
         return cls(
             lastfm=lastfm_cfg,
             spotify=spotify_cfg,
+            sources=sources_cfg,
             engine=engine_cfg,
             system=system_cfg,
         )

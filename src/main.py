@@ -242,17 +242,28 @@ def main():
     source_service = None
     ingestion_error = None
 
-    if config.spotify.sources:
-        logger.info(f"Resolving {len(config.spotify.sources)} configured playlist/album source(s)...")
+    configured_sources = (
+        config.sources.sources
+        if hasattr(config, "sources") and config.sources.sources
+        else config.spotify.sources
+    )
+    refresh_ttl = (
+        config.sources.refresh_interval_hours
+        if hasattr(config, "sources")
+        else config.spotify.refresh_interval_hours
+    )
+
+    if configured_sources:
+        logger.info(f"Resolving {len(configured_sources)} configured playlist/album source(s)...")
         cache_file = config.system.data_dir / "tracks_cache.json"
         source_service = SourceIngestionService(
             client_id=config.spotify.client_id,
             client_secret=config.spotify.client_secret,
             cache_path=cache_file,
-            ttl_hours=config.spotify.refresh_interval_hours,
+            ttl_hours=refresh_ttl,
         )
         try:
-            tracks = source_service.fetch_sources(config.spotify.sources, use_cache_if_available=True)
+            tracks = source_service.fetch_sources(configured_sources, use_cache_if_available=True)
         except Exception as e:
             logger.error(f"Failed to fetch tracks from sources ({type(e).__name__}): {e}")
             ingestion_error = e

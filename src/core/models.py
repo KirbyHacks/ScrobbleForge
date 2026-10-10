@@ -53,8 +53,13 @@ def to_canonical_track(
             resolved_source_uri = track.source_name
         elif track.spotify_id:
             resolved_source_uri = f"spotify:track:{track.spotify_id}"
-        elif track.source_name:
-            resolved_source_uri = track.source_name
+        elif track.source_name and ":" in track.source_name and not track.source_name.startswith("http"):
+            parts = track.source_name.split(":", 1)
+            if parts[0].isalnum() and " " not in parts[0]:
+                resolved_source_uri = track.source_name
+
+    # prefer explicit provider info supplied on Track or by caller without registry dependency
+    resolved_provider_id = getattr(track, "provider_id", None) or provider_id
 
     return CanonicalTrack(
         title=track.title,
@@ -63,7 +68,7 @@ def to_canonical_track(
         duration_ms=track.duration_ms if track.duration_ms > 0 else None,
         isrc=None,
         external_ids=external_ids,
-        provider_id=provider_id,
+        provider_id=resolved_provider_id,
         source_uri=resolved_source_uri,
         source_name=track.source_name if track.source_name else None,
     )
@@ -79,6 +84,7 @@ def to_legacy_track(
 
     resolved_source_name = source_name or canonical.source_name or canonical.source_uri or ""
     spotify_id = canonical.external_ids.get("spotify")
+    provider_id = canonical.provider_id if canonical.provider_id != "unknown" else None
 
     return Track(
         title=canonical.title,
@@ -89,4 +95,5 @@ def to_legacy_track(
         track_number=track_number,
         spotify_id=spotify_id,
         source_name=resolved_source_name,
+        provider_id=provider_id,
     )

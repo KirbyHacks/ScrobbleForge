@@ -81,12 +81,12 @@ docker run --rm -v "${PWD}:/out" ghcr.io/kirbyhacks/scrobbleforge:latest init
 
 *(Alternatively, download `docker-compose.yml` and `.env.example` directly from GitHub).*
 
-2. Edit `.env` with your Last.fm API Key, API Secret, and Spotify URL:
+2. Edit `.env` with your Last.fm API Key, API Secret, and music source URL:
 
 ```dotenv
 LASTFM_API_KEY=your_lastfm_api_key
 LASTFM_API_SECRET=your_lastfm_api_secret
-SPOTIFY_PLAYLIST_URL=https://open.spotify.com/playlist/37i9dQZF1DXcBWIGoYBM5M
+MUSIC_SOURCES=https://open.spotify.com/playlist/37i9dQZF1DXcBWIGoYBM5M
 ```
 
 3. Start the container:
@@ -136,7 +136,8 @@ Settings can be specified in `.env` or passed directly as Docker environment var
 | `LASTFM_API_SECRET` | *(required)* | Last.fm Shared Secret |
 | `LASTFM_USERNAME` | *(optional)* | Last.fm Account Username (auto-detected on authorization) |
 | `LASTFM_SESSION_KEY` | *(auto-generated)* | Permanent session key. If omitted, ScrobbleForge logs a 1-click web approval link and auto-saves to `data/session.key` |
-| `SPOTIFY_PLAYLIST_URL` | *(required)* | Spotify playlist, album, or single track URL. Comma-separate for multiple sources |
+| `MUSIC_SOURCES` | *(required unless legacy used)* | Comma-separated playlist, album, or track URLs (repeated entries preserved for queue weighting). Generic source variable taking precedence over legacy Spotify variables. Currently supported provider: Spotify |
+| `SPOTIFY_PLAYLIST_URL` | *(legacy fallback)* | Legacy Spotify playlist, album, or single track URL. Used when `MUSIC_SOURCES` is omitted |
 | `SCROBBLE_MODE` | `realistic` | Pacing mode: `realistic`, `max_limit`, or `custom_interval` |
 | `CUSTOM_INTERVAL_SECONDS` | `60` | Delay in seconds when `SCROBBLE_MODE=custom_interval` |
 | `MAX_DAILY_SCROBBLES` | `2750` | Configurable daily safety ceiling (buffer against Last.fm's ~2,800 limit) |
@@ -145,7 +146,8 @@ Settings can be specified in `.env` or passed directly as Docker environment var
 | `UPDATE_NOW_PLAYING` | `true` | Broadcasts "Now Playing" in `realistic` mode |
 | `INTER_TRACK_PAUSE_MIN` | `1.0` | Minimum pause between tracks in seconds |
 | `INTER_TRACK_PAUSE_MAX` | `4.0` | Maximum pause between tracks in seconds |
-| `SPOTIFY_REFRESH_INTERVAL_HOURS` | `12` | Hours between automatic source playlist refreshes |
+| `SOURCES_REFRESH_INTERVAL_HOURS` | `12` | Hours between automatic source refreshes. Takes precedence over `SPOTIFY_REFRESH_INTERVAL_HOURS` |
+| `SPOTIFY_REFRESH_INTERVAL_HOURS` | `12` | Legacy hours between automatic Spotify source refreshes |
 | `DATA_DIR` | `./data` | Directory where SQLite state and cache are persisted |
 | `LOG_LEVEL` | `INFO` | Console logging verbosity (`DEBUG`, `INFO`, `WARNING`, `ERROR`) |
 

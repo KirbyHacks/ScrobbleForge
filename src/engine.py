@@ -288,16 +288,23 @@ class ScrobblerEngine:
         return True
 
     def _check_periodic_refresh(self):
-        if not self.spotify or not self.cfg.spotify.sources:
+        sources_cfg = getattr(self.cfg, "sources", None)
+        source_list = sources_cfg.sources if (sources_cfg and sources_cfg.sources) else self.cfg.spotify.sources
+        if not self.spotify or not source_list:
             return
 
-        interval_sec = self.cfg.spotify.refresh_interval_hours * 3600
+        refresh_hours = (
+            sources_cfg.refresh_interval_hours
+            if sources_cfg
+            else self.cfg.spotify.refresh_interval_hours
+        )
+        interval_sec = refresh_hours * 3600
         now = time.time()
         if (now - self.last_refresh_time) >= interval_sec:
             logger.info("[REFRESH] refreshing spotify sources...")
             try:
                 fresh_tracks = self.spotify.fetch_sources(
-                    self.cfg.spotify.sources,
+                    source_list,
                     use_cache_if_available=False
                 )
                 if fresh_tracks:

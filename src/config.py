@@ -6,7 +6,7 @@ from dotenv import load_dotenv
 
 
 class ConfigError(ValueError):
-    """Raised when environment configuration fails validation."""
+    """raised when environment configuration fails validation."""
     pass
 
 
@@ -88,7 +88,7 @@ def _parse_float(
 
 
 def _clean_credential(val: Optional[str]) -> Optional[str]:
-    """Filters out empty strings and standard template placeholders."""
+    """filter out empty strings and standard template placeholders."""
     if val is None:
         return None
     s = str(val).strip()
@@ -144,7 +144,7 @@ class AppConfig:
 
     @classmethod
     def from_env(cls, env_path: Optional[str] = None) -> "AppConfig":
-        """Loads and validates configuration from environment variables and optional .env file."""
+        """load and validate configuration from environment variables and optional .env file."""
         if env_path:
             load_dotenv(dotenv_path=env_path)
         else:
@@ -262,5 +262,5 @@ class AppConfig:
 
 
 def load_config(env_path: Optional[str] = None) -> AppConfig:
-    """Loads configuration from environment variables and .env file."""
+    """load configuration from environment variables and .env file."""
     return AppConfig.from_env(env_path=env_path)

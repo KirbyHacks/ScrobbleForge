@@ -5,7 +5,7 @@ import sys
 import threading
 from pathlib import Path
 
-# Support running directly as 'python src/main.py' or 'python -m src.main'
+# support running directly as 'python src/main.py' or 'python -m src.main'
 if __package__ is None or __package__ == "":
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
     from src import __version__
@@ -22,7 +22,8 @@ if __package__ is None or __package__ == "":
     )
     from src.queue_manager import QueueManager
     from src.quota_tracker import QuotaTracker
-    from src.spotify_client import SpotifyClient, load_local_fallback_tracks
+    from src.sources import SourceIngestionService
+    from src.spotify_client import load_local_fallback_tracks
 else:
     from . import __version__
     from .config import load_config
@@ -38,7 +39,8 @@ else:
     )
     from .queue_manager import QueueManager
     from .quota_tracker import QuotaTracker
-    from .spotify_client import SpotifyClient, load_local_fallback_tracks
+    from .sources import SourceIngestionService
+    from .spotify_client import load_local_fallback_tracks
 
 
 DOCKER_COMPOSE_TEMPLATE = """services:
@@ -59,7 +61,7 @@ DOCKER_COMPOSE_TEMPLATE = """services:
 
 
 def cmd_init():
-    """Generates starter docker-compose.yml and .env files."""
+    """generate starter docker-compose.yml and .env files."""
     out_dir = Path("/out") if Path("/out").is_dir() else Path(".")
     print(f"Generating ScrobbleForge starter files in: {out_dir.resolve()}")
     compose_path = out_dir / "docker-compose.yml"
@@ -108,13 +110,13 @@ def cmd_init():
 
 
 def cmd_auth():
-    """Runs interactive authorization helper."""
+    """run interactive authorization helper."""
     import auth_helper
     auth_helper.main()
 
 
 def setup_logging(log_level_str: str):
-    """Sets up unified timestamped stdout logging."""
+    """set up unified timestamped stdout logging."""
     level = getattr(logging, log_level_str.upper(), logging.INFO)
     log_format = "[%(asctime)s] [%(levelname)s] %(message)s"
     date_format = "%Y-%m-%d %H:%M:%S"
@@ -163,7 +165,7 @@ def main():
         )
         sys.exit(1)
 
-    # Web authorization handshake
+    # web authorization handshake
     if not config.lastfm.session_key and not config.lastfm.password:
         logger.info("No LASTFM_SESSION_KEY found. Initiating one-time Last.fm web authorization...")
         try:
@@ -237,24 +239,26 @@ def main():
     tracker.prune_old_records(retention_days=14)
 
     tracks = []
-    spotify_client = None
+    source_service = None
+    ingestion_error = None
 
     if config.spotify.sources:
         logger.info(f"Resolving {len(config.spotify.sources)} configured playlist/album source(s)...")
         cache_file = config.system.data_dir / "tracks_cache.json"
-        spotify_client = SpotifyClient(
+        source_service = SourceIngestionService(
             client_id=config.spotify.client_id,
             client_secret=config.spotify.client_secret,
             cache_path=cache_file,
             ttl_hours=config.spotify.refresh_interval_hours,
         )
         try:
-            tracks = spotify_client.fetch_sources(config.spotify.sources, use_cache_if_available=True)
+            tracks = source_service.fetch_sources(config.spotify.sources, use_cache_if_available=True)
         except Exception as e:
-            logger.error(f"Failed to fetch tracks from Spotify: {e}")
+            logger.error(f"Failed to fetch tracks from sources ({type(e).__name__}): {e}")
+            ingestion_error = e
 
-    # Fallback checks if Spotify yielded no tracks
-    if not tracks:
+    # load fallback tracks only when provider ingestion did not fail
+    if not tracks and ingestion_error is None:
         for fallback_candidate in [
             config.system.data_dir / "tracks.csv",
             config.system.data_dir / "tracks.json",
@@ -270,16 +274,19 @@ def main():
                     break
 
     if not tracks:
-        logger.error(
-            "No tracks available to scrobble!\n"
-            "Please provide a valid SPOTIFY_PLAYLIST_URL in .env, "
-            "or place a tracks.txt file in the directory formatted as 'Artist - Title' per line."
-        )
+        if ingestion_error is not None:
+            logger.error(f"Startup aborted: source ingestion failed ({type(ingestion_error).__name__}).")
+        else:
+            logger.error(
+                "No tracks available to scrobble!\n"
+                "Please provide a valid SPOTIFY_PLAYLIST_URL in .env, "
+                "or place a tracks.txt file in the directory formatted as 'Artist - Title' per line."
+            )
         sys.exit(1)
 
     logger.info(f"Successfully loaded {len(tracks)} track(s) for scrobbling.")
 
-    # Authenticate with Last.fm
+    # authenticate with Last.fm
     try:
         lastfm_client = LastFMClient(
             api_key=config.lastfm.api_key,
@@ -295,7 +302,7 @@ def main():
         logger.error(f"Last.fm session verification failed (network error, retry later): {e}")
         sys.exit(1)
 
-    # Setup queue manager
+    # initialize queue manager
     queue = QueueManager(
         tracks=tracks,
         tracker=tracker,
@@ -303,11 +310,11 @@ def main():
         loop=config.engine.loop,
     )
 
-    # Launch engine
+    # launch scrobbler engine
     engine = ScrobblerEngine(
         config=config,
         lastfm=lastfm_client,
-        spotify=spotify_client,
+        spotify=source_service,
         queue=queue,
         tracker=tracker,
         stop_event=stop_event,

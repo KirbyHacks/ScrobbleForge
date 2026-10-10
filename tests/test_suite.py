@@ -1,4 +1,4 @@
-"""Backward-compatible runner for test_suite.py delegating to tests/unit."""
+"""runner for test_suite.py delegating to tests/unit."""
 import sys
 from pathlib import Path
 import unittest
@@ -13,8 +13,7 @@ ensure_dependencies_mocked()
 
 
 def load_tests(loader, standard_tests, pattern):
-    # If loaded directly (e.g. `python -m unittest tests/test_suite.py` or `python tests/test_suite.py`),
-    # discover and return unit tests. If called during `discover -s tests`, return empty suite to avoid duplicate execution.
+    # return unit tests when run directly; return empty suite during recursive discovery
     if pattern is None or pattern == "test_suite.py":
         unit_dir = Path(__file__).resolve().parent / "unit"
         return loader.discover(start_dir=str(unit_dir), pattern="test_*.py")

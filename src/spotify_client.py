@@ -18,7 +18,7 @@ _USER_AGENT = (
 )
 
 def extract_primary_artist(raw_subtitle: str) -> str:
-    """Extracts primary artist, handling Spotify comma + non-breaking space delimiters."""
+    """extract primary artist, handling spotify comma + non-breaking space delimiters."""
     if not raw_subtitle or not raw_subtitle.strip():
         return "Unknown Artist"
 
@@ -33,12 +33,12 @@ def extract_primary_artist(raw_subtitle: str) -> str:
 
 
 class SpotifyIngestionError(Exception):
-    """Raised when track resolution fails."""
+    """raised when track resolution fails."""
     pass
 
 
 class SpotifyEmbedParser:
-    """Stateless parser for extracting tracks from Spotify public embed HTML/JSON payloads."""
+    """stateless parser for extracting tracks from spotify public embed html/json payloads."""
 
     @staticmethod
     def extract_artist(
@@ -46,7 +46,7 @@ class SpotifyEmbedParser:
         subtitle: str = "",
         fallback: str = "Unknown Artist",
     ) -> str:
-        """Extracts and normalizes primary artist from artists array, dict, string, or subtitle."""
+        """extract and normalize primary artist from artists array, dict, string, or subtitle."""
         if raw_artists:
             if isinstance(raw_artists, list) and len(raw_artists) > 0:
                 first = raw_artists[0]
@@ -72,7 +72,7 @@ class SpotifyEmbedParser:
 
     @staticmethod
     def normalize_duration(val: Any, default: int = 180000) -> int:
-        """Normalizes duration in milliseconds with fallback for missing or non-positive values."""
+        """normalize duration in milliseconds with fallback for missing or non-positive values."""
         if val is None:
             return default
         try:
@@ -83,7 +83,7 @@ class SpotifyEmbedParser:
 
     @staticmethod
     def extract_spotify_id(uri: Optional[str] = None, explicit_id: Optional[str] = None) -> Optional[str]:
-        """Extracts Spotify ID from URI or explicit ID."""
+        """extract spotify id from uri or explicit id."""
         if uri and ":" in uri:
             return uri.split(":")[-1]
         if uri and "/" in uri:
@@ -96,19 +96,18 @@ class SpotifyEmbedParser:
 
     @classmethod
     def _extract_json(cls, content: str) -> dict:
-        """Extracts Next.js payload JSON from HTML markup or raw JSON string."""
+        """extract next.js payload json from html markup or raw json string."""
         if not content or not content.strip():
             raise SpotifyIngestionError("No metadata found on Spotify embed page (empty content)")
 
         trimmed = content.strip()
-        # direct json string check
         if trimmed.startswith("{") and trimmed.endswith("}"):
             try:
                 return json.loads(trimmed)
             except Exception:
                 pass
 
-        # next.js script tag match
+        # find next.js script tag in page html
         match = re.search(
             r'<script id="__NEXT_DATA__"[^>]*>(.*?)</script>',
             trimmed,
@@ -120,7 +119,6 @@ class SpotifyEmbedParser:
             except Exception as e:
                 raise SpotifyIngestionError(f"Failed to parse embed JSON: {e}") from e
 
-        # retry direct json parse if content starts with brace
         if trimmed.startswith("{"):
             try:
                 return json.loads(trimmed)
@@ -131,7 +129,7 @@ class SpotifyEmbedParser:
 
     @classmethod
     def _extract_entity(cls, payload: dict) -> dict:
-        """Navigates Next.js data paths to locate the Spotify entity."""
+        """navigate next.js data paths to locate the spotify entity."""
         if not isinstance(payload, dict):
             return {}
 
@@ -163,7 +161,7 @@ class SpotifyEmbedParser:
             if isinstance(curr, dict):
                 return curr
 
-        # Direct entity payload check
+        # direct entity payload fallback
         if any(k in payload for k in ("trackList", "tracks", "title", "name", "uri")):
             return payload
 
@@ -171,7 +169,7 @@ class SpotifyEmbedParser:
 
     @classmethod
     def _infer_entity_type(cls, entity: dict) -> str:
-        """Infers entity type ('track', 'album', 'playlist') from entity metadata."""
+        """infer entity type ('track', 'album', 'playlist') from entity metadata."""
         etype = (entity.get("type") or "").lower().strip()
         if etype in ("track", "album", "playlist"):
             return etype
@@ -197,7 +195,7 @@ class SpotifyEmbedParser:
 
     @classmethod
     def _extract_raw_tracks(cls, entity: dict) -> list:
-        """Extracts track items list from embed entity or nested structures."""
+        """extract track items list from embed entity or nested structures."""
         if "trackList" in entity and isinstance(entity["trackList"], list):
             return entity["trackList"]
 
@@ -217,7 +215,7 @@ class SpotifyEmbedParser:
 
     @classmethod
     def _parse_track(cls, entity: dict, default_id: Optional[str] = None) -> List[Track]:
-        """Parses single track entity into a List[Track]."""
+        """parse single track entity into a track list."""
         title = (entity.get("title") or entity.get("name") or "Unknown Track").strip()
         primary_artist = cls.extract_artist(entity.get("artists"), entity.get("subtitle", ""))
 
@@ -253,7 +251,7 @@ class SpotifyEmbedParser:
 
     @classmethod
     def _parse_album(cls, entity: dict, default_id: Optional[str] = None) -> List[Track]:
-        """Parses album entity and track list into a List[Track]."""
+        """parse album entity and track list into a track list."""
         album_name = (entity.get("name") or entity.get("title") or f"Album ({default_id or 'unknown'})").strip()
         album_artist = cls.extract_artist(entity.get("artists"), entity.get("subtitle", ""), fallback="")
 
@@ -291,7 +289,7 @@ class SpotifyEmbedParser:
 
     @classmethod
     def _parse_playlist(cls, entity: dict, default_id: Optional[str] = None) -> List[Track]:
-        """Parses playlist entity and track list into a List[Track]."""
+        """parse playlist entity and track list into a track list."""
         playlist_name = (entity.get("name") or entity.get("title") or f"Playlist ({default_id or 'unknown'})").strip()
         raw_tracks = cls._extract_raw_tracks(entity)
 
@@ -341,7 +339,7 @@ class SpotifyEmbedParser:
         entity_type: Optional[str] = None,
         default_id: Optional[str] = None,
     ) -> List[Track]:
-        """Parses raw HTML or JSON string from Spotify embed into standardized Track models."""
+        """parse raw html or json string from spotify embed into standardized track models."""
         payload = cls._extract_json(content)
         entity = cls._extract_entity(payload)
 
@@ -361,14 +359,14 @@ class SpotifyEmbedParser:
 
 
 def compute_sources_hash(sources: List[str]) -> str:
-    """Computes a deterministic SHA-256 hash of normalized source URLs."""
+    """compute deterministic sha-256 hash of normalized source urls."""
     normalized = sorted([s.strip().lower() for s in sources if s.strip()])
     serialized = json.dumps(normalized)
     return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
 
 
 class SpotifyClient:
-    """Resolves Spotify playlists, albums, and tracks into standardized Track models."""
+    """resolve spotify playlists, albums, and tracks into standardized track models."""
 
     def __init__(
         self,
@@ -391,7 +389,7 @@ class SpotifyClient:
 
     @staticmethod
     def parse_spotify_uri(uri_or_url: str) -> Tuple[str, str]:
-        """Parses a Spotify URL, URI, or ID into (item_type, item_id)."""
+        """parse a spotify url, uri, or id into (item_type, item_id)."""
         raw = uri_or_url.strip()
 
         if raw.startswith("spotify:"):
@@ -410,7 +408,7 @@ class SpotifyClient:
         sources: Optional[List[str]] = None,
         max_age_seconds: Optional[float] = None,
     ) -> List[Track]:
-        """Loads cached tracks from disk if valid, matching sources, and within TTL."""
+        """load cached tracks from disk if valid, matching sources, and within ttl."""
         if not self.cache_path or not self.cache_path.is_file():
             return []
         try:
@@ -422,6 +420,27 @@ class SpotifyClient:
                 cached_hash = data.get("sources_hash")
                 if cached_hash != expected_hash:
                     logger.info("[CACHE INVALID] source URLs changed -> invalidating track cache")
+                    return []
+
+                norm_req = [s.strip().lower() for s in sources if s.strip()]
+                norm_cached = [s.strip().lower() for s in data.get("sources", []) if s.strip()]
+                # if source order differs from how cache was saved, reconstruct from source_tracks
+                if norm_req != norm_cached:
+                    cached_source_tracks = data.get("source_tracks")
+                    if isinstance(cached_source_tracks, dict):
+                        reordered = []
+                        all_found = True
+                        for s in norm_req:
+                            if s in cached_source_tracks:
+                                reordered.extend([Track.from_dict(item) for item in cached_source_tracks[s]])
+                            else:
+                                all_found = False
+                                break
+                        if all_found and reordered:
+                            logger.info(f"Loaded {len(reordered)} cached tracks reordered to match source order")
+                            return reordered
+                    # if per-source tracks not available in legacy cache, invalidate to enforce requested ordering
+                    logger.info("[CACHE INVALID] source ordering changed without per-source breakdown -> re-fetching")
                     return []
 
             ttl = max_age_seconds if max_age_seconds is not None else self.ttl_seconds
@@ -441,11 +460,35 @@ class SpotifyClient:
             logger.warning(f"Could not read track cache: {e}")
             return []
 
-    def save_cache(self, tracks: List[Track], sources: List[str]):
-        """Saves tracks to disk cache."""
+    def save_cache(
+        self,
+        tracks: List[Track],
+        sources: List[str],
+        source_tracks: Optional[Dict[str, List[Track]]] = None,
+    ):
+        """save tracks to disk cache atomically.
+
+        note: scrobbleforge runs as a single daemon process; concurrent writers
+        are not supported and no inter-process locking is performed.
+        """
         if not self.cache_path:
             return
+        tmp_path = None
         try:
+            if self.cache_path.is_file():
+                try:
+                    with open(self.cache_path, "r", encoding="utf-8") as f:
+                        existing = json.load(f)
+                    existing_sources = existing.get("sources", [])
+                    existing_saved_at = existing.get("saved_at", 0)
+                    now = int(time.time())
+                    # do not overwrite a valid multi-source batch cache with a smaller subset fetch
+                    if len(existing_sources) > len(sources) and (now - existing_saved_at) < self.ttl_seconds:
+                        logger.debug("Preserving existing batch cache; refusing overwrite by smaller source list.")
+                        return
+                except Exception:
+                    pass
+
             self.cache_path.parent.mkdir(parents=True, exist_ok=True)
             payload = {
                 "saved_at": int(time.time()),
@@ -453,14 +496,31 @@ class SpotifyClient:
                 "sources_hash": compute_sources_hash(sources),
                 "tracks": [t.to_dict() for t in tracks],
             }
-            with open(self.cache_path, "w", encoding="utf-8") as f:
+            if source_tracks is None and len(sources) == 1 and sources[0].strip():
+                source_tracks = {sources[0].strip().lower(): tracks}
+
+            if source_tracks:
+                payload["source_tracks"] = {
+                    s: [t.to_dict() for t in s_tracks]
+                    for s, s_tracks in source_tracks.items()
+                }
+
+            tmp_path = self.cache_path.with_suffix(".tmp")
+            with open(tmp_path, "w", encoding="utf-8") as f:
                 json.dump(payload, f, indent=2)
+            tmp_path.replace(self.cache_path)
+            tmp_path = None
             logger.debug(f"Cached {len(tracks)} tracks to {self.cache_path}")
         except Exception as e:
+            if tmp_path and tmp_path.is_file():
+                try:
+                    tmp_path.unlink()
+                except Exception:
+                    pass
             logger.warning(f"Could not save track cache: {e}")
 
     def fetch_embed_tracks(self, item_type: str, item_id: str) -> List[Track]:
-        """Extracts tracks and exact durations from Spotify public embed page."""
+        """extract tracks and exact durations from spotify public embed page."""
         url = f"https://open.spotify.com/embed/{item_type}/{item_id}"
         headers = {"User-Agent": _USER_AGENT, "Accept-Language": "en-US,en;q=0.9"}
 
@@ -486,13 +546,14 @@ class SpotifyClient:
         )
 
     def fetch_sources(self, sources: List[str], use_cache_if_available: bool = True) -> List[Track]:
-        """Resolves tracks from all configured sources with cache fallback."""
+        """resolve tracks from all configured sources with cache fallback."""
         if use_cache_if_available:
             cached = self.load_cache(sources=sources)
             if cached:
                 return cached
 
         all_tracks: List[Track] = []
+        source_tracks: Dict[str, List[Track]] = {}
         try:
             for source in sources:
                 source = source.strip()
@@ -502,9 +563,10 @@ class SpotifyClient:
                 item_type, item_id = self.parse_spotify_uri(source)
                 tracks = self.fetch_embed_tracks(item_type, item_id)
                 all_tracks.extend(tracks)
+                source_tracks[source.strip().lower()] = tracks
 
             if all_tracks:
-                self.save_cache(all_tracks, sources)
+                self.save_cache(all_tracks, sources, source_tracks=source_tracks)
                 return all_tracks
 
         except Exception as e:
@@ -519,7 +581,7 @@ class SpotifyClient:
 
 
 def load_local_fallback_tracks(file_path: Path) -> List[Track]:
-    """Loads fallback tracks from txt, csv, or json files."""
+    """load fallback tracks from txt, csv, or json files."""
     path = Path(file_path)
     if not path.is_file():
         return []

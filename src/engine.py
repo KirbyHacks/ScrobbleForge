@@ -30,7 +30,7 @@ LASTFM_MIN_SCROBBLE_DURATION_SEC = 30
 
 
 def is_transient_error(exc: Exception) -> bool:
-    """Identifies transient network or infrastructure errors eligible for backoff and retry."""
+    """check if an error is transient and safe to retry with backoff."""
     if isinstance(exc, (LastFMTemporaryError, LastFMRateLimitError, requests.RequestException, sqlite3.OperationalError, SpotifyIngestionError, ConnectionError, TimeoutError)):
         return True
     if pylast is not None:
@@ -47,7 +47,7 @@ def is_transient_error(exc: Exception) -> bool:
 
 
 class ScrobblerEngine:
-    """Coordinates playback timing, pacing modes, and quota limits."""
+    """coordinate playback timing, pacing modes, and quota limits."""
 
     def __init__(
         self,
@@ -132,7 +132,7 @@ class ScrobblerEngine:
                     self.pending_track = None
                     self.consecutive_errors = 0
                 else:
-                    # Aborted before submission: do not commit progress, keep pending_track
+                    # aborted before submission: do not commit progress and keep pending_track
                     if self.stop_event.is_set():
                         break
                     continue
@@ -185,7 +185,7 @@ class ScrobblerEngine:
     def _execute_realistic_step(self, track: Track) -> bool:
         track_start_time = int(time.time())
         duration_sec = track.duration_sec
-        # last.fm requires minimum 30s duration
+        # last.fm requires a minimum 30s track duration
         scrobble_duration = max(LASTFM_MIN_SCROBBLE_DURATION_SEC, duration_sec)
 
         if self.cfg.engine.update_now_playing:
@@ -228,12 +228,12 @@ class ScrobblerEngine:
     def _execute_max_limit_step(self, track: Track) -> bool:
         now = int(time.time())
 
-        # strictly monotonic virtual timeline advancement
+        # advance virtual timeline monotonically to avoid timestamp collisions
         if self.virtual_timeline_cursor is None:
             self.virtual_timeline_cursor = now - (3 * 86400)
 
         duration_sec = track.duration_sec
-        # last.fm requires minimum 30s duration
+        # last.fm requires a minimum 30s track duration
         scrobble_duration = max(LASTFM_MIN_SCROBBLE_DURATION_SEC, duration_sec)
 
         wait_needed = 0

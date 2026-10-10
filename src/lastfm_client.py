@@ -12,32 +12,32 @@ LASTFM_MIN_SCROBBLE_DURATION_SEC = 30
 
 
 class LastFMAuthError(Exception):
-    """Raised on authentication or session failure."""
+    """raised on authentication or session failure."""
     pass
 
 
 class LastFMAuthTimeoutError(LastFMAuthError):
-    """Raised when web authorization polling exceeds the hard timeout."""
+    """raised when web authorization times out."""
     pass
 
 
 class LastFMAuthCancelledError(LastFMAuthError):
-    """Raised when web authorization is cancelled via shutdown signal."""
+    """raised when web authorization is stopped by a shutdown signal."""
     pass
 
 
 class LastFMRateLimitError(Exception):
-    """Raised when Last.fm rate limits requests (code 29)."""
+    """raised when Last.fm rate limits requests (code 29)."""
     pass
 
 
 class LastFMTemporaryError(Exception):
-    """Raised on transient network or server errors."""
+    """raised on temporary network or server errors."""
     pass
 
 
 def initiate_web_auth(api_key: str, api_secret: str) -> Tuple[pylast.SessionKeyGenerator, str]:
-    """Initializes a Last.fm Web Authentication session and returns (generator, auth_url)."""
+    """starts a Last.fm web authentication session and returns the generator and url."""
     network = pylast.LastFMNetwork(api_key=api_key.strip(), api_secret=api_secret.strip())
     skg = pylast.SessionKeyGenerator(network)
     auth_url = skg.get_web_auth_url()
@@ -51,12 +51,7 @@ def poll_web_auth(
     poll_interval: float = 6.0,
     timeout_seconds: float = 900.0,
 ) -> Tuple[str, str]:
-    """
-    Non-blocking poller for Last.fm web authorization.
-    Handles Last.fm Error 14 ('This token has not been authorized') until user approves in browser.
-    Respects stop_event for clean shutdown and enforces a hard timeout.
-    Returns (session_key, username).
-    """
+    """polls Last.fm until the user authorizes the app in their browser."""
     start_time = time.time()
     logger.info("Awaiting Last.fm browser approval...")
 
@@ -71,7 +66,7 @@ def poll_web_auth(
             if session_key and username:
                 return str(session_key).strip(), str(username).strip()
         except pylast.WSError as exc:
-            # Code 14: This token has not been authorized yet
+            # code 14 means the user has not clicked authorize yet
             if str(exc.status) == "14" or "not been authorized" in str(exc.details).lower():
                 pass
             else:
@@ -83,7 +78,7 @@ def poll_web_auth(
         except Exception as exc:
             raise LastFMAuthError(f"Unexpected error during authorization: {exc}") from exc
 
-        # Wait using stop_event to allow instantaneous SIGINT/SIGTERM interruption
+        # wait using stop_event so we can stop immediately on shutdown
         if stop_event.wait(timeout=poll_interval):
             raise LastFMAuthCancelledError("Authorization cancelled by shutdown signal.")
 
@@ -91,7 +86,7 @@ def poll_web_auth(
 
 
 class LastFMClient:
-    """Wrapper for Last.fm API interactions using session key or password authentication."""
+    """client for scrobbling and updating now playing on Last.fm."""
 
     def __init__(
         self,
@@ -111,7 +106,7 @@ class LastFMClient:
         self._authenticate()
 
     def _authenticate(self):
-        """Initializes LastFMNetwork session."""
+        """sets up the Last.fm network session."""
         if not self.api_key or not self.api_secret:
             raise LastFMAuthError("Missing LASTFM_API_KEY or LASTFM_API_SECRET.")
 
@@ -142,7 +137,7 @@ class LastFMClient:
         self._verify_session_validity()
 
     def _verify_session_validity(self):
-        """Verifies session validity fail-fast by testing get_authenticated_user()."""
+        """checks that the session key is valid before starting playback."""
         try:
             user = self.network.get_authenticated_user()
             if user is None:
@@ -165,13 +160,13 @@ class LastFMClient:
                 raise LastFMAuthError(f"Last.fm authentication failed ({status or 'unknown'}): {details}") from e
             if status in ("11", "16", "26", "29"):
                 raise LastFMTemporaryError(f"Last.fm service temporary error ({status}): {details}") from e
-            # Do not disguise protocol/configuration errors as connectivity failures.
+            # do not treat protocol or configuration errors as network failures
             raise
         except (pylast.NetworkError, pylast.MalformedResponseError, ConnectionError, TimeoutError, OSError) as e:
             raise LastFMTemporaryError(f"Network error during session verification: {e}") from e
 
     def update_now_playing(self, track: Track) -> bool:
-        """Sends track.updateNowPlaying to Last.fm."""
+        """updates the currently playing track on Last.fm."""
         if not self.network:
             return False
 
@@ -192,7 +187,7 @@ class LastFMClient:
             return False
 
     def scrobble(self, track: Track, timestamp: Optional[int] = None) -> bool:
-        """Submits track.scrobble to Last.fm via pylast._Request and inspects response XML."""
+        """submits a scrobble to Last.fm and checks the response."""
         if not self.network:
             raise LastFMAuthError("Last.fm client is not authenticated.")
 
@@ -217,7 +212,7 @@ class LastFMClient:
             if doc is None:
                 raise LastFMTemporaryError("Empty XML response received from Last.fm.")
 
-            # Check <scrobbles ignored="N">
+            # check if Last.fm ignored the scrobble
             scrobbles_nodes = doc.getElementsByTagName("scrobbles")
             if not scrobbles_nodes:
                 raise LastFMTemporaryError("[SCROBBLE] Malformed response: missing <scrobbles> tag")
@@ -234,7 +229,7 @@ class LastFMClient:
                 logger.warning(f"[IGNORED SCROBBLE] code {code}: {message}")
                 return False
 
-            # Check <ignoredMessage code="...">
+            # check for ignored message code in the response
             msg_nodes = doc.getElementsByTagName("ignoredMessage")
             if msg_nodes:
                 node = msg_nodes[0]

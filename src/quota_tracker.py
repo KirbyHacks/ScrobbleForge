@@ -6,10 +6,7 @@ from typing import Generator, Optional, Tuple
 
 
 class QuotaTracker:
-    """
-    Manages persistent state and rolling 24-hour Last.fm quota tracking.
-    Uses SQLite WAL (Write-Ahead Logging) mode for safe concurrent access.
-    """
+    """tracks 24-hour Last.fm quota and state in SQLite using WAL mode."""
 
     def __init__(self, db_path: Path):
         self.db_path = Path(db_path)
@@ -51,7 +48,7 @@ class QuotaTracker:
             conn.commit()
 
     def record_scrobble(self, artist: str, title: str, timestamp: Optional[int] = None):
-        """Records a scrobble timestamp for rolling window tracking."""
+        """records a scrobble timestamp for rolling window tracking."""
         ts = timestamp if timestamp is not None else int(time.time())
         with self._connection() as conn:
             cursor = conn.cursor()
@@ -62,7 +59,7 @@ class QuotaTracker:
             conn.commit()
 
     def get_rolling_24h_count(self, now: Optional[int] = None) -> int:
-        """Counts scrobbles submitted in the rolling 24-hour window."""
+        """counts scrobbles submitted in the rolling 24-hour window."""
         current_time = now if now is not None else int(time.time())
         cutoff = current_time - 86400
         with self._connection() as conn:
@@ -71,19 +68,15 @@ class QuotaTracker:
             return cursor.fetchone()[0]
 
     def can_scrobble(self, max_daily_limit: int = 2750, now: Optional[int] = None) -> Tuple[bool, int]:
-        """
-        Determines whether the engine is allowed to scrobble or must pause.
-        Returns:
-            (allowed: bool, wait_seconds: int)
-        """
+        """checks if scrobbling is allowed or how many seconds to wait."""
         current_time = now if now is not None else int(time.time())
         count = self.get_rolling_24h_count(now=current_time)
 
         if count < max_daily_limit:
             return True, 0
 
-        # Because admission requires count < limit, enough rows must expire to
-        # bring the count strictly below the limit (not merely down to it).
+        # to allow a new scrobble, rolling count must drop to max_daily_limit - 1,
+        # so count - max_daily_limit + 1 records must expire from the 24h window.
         cutoff = current_time - 86400
         rows_to_expire = count - max_daily_limit + 1
         if rows_to_expire > 0:
@@ -102,14 +95,14 @@ class QuotaTracker:
         return False, 60
 
     def get_total_scrobbles(self) -> int:
-        """Returns total historical scrobbles recorded in the local ledger."""
+        """returns total historical scrobbles in the database."""
         with self._connection() as conn:
             cursor = conn.cursor()
             cursor.execute("SELECT COUNT(*) FROM scrobbles")
             return cursor.fetchone()[0]
 
     def set_state(self, key: str, value: str):
-        """Sets a persistent key-value property."""
+        """saves a key-value pair in app_state."""
         with self._connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -119,7 +112,7 @@ class QuotaTracker:
             conn.commit()
 
     def get_state(self, key: str, default: Optional[str] = None) -> Optional[str]:
-        """Reads a persistent key-value property."""
+        """reads a key-value pair from app_state."""
         with self._connection() as conn:
             cursor = conn.cursor()
             cursor.execute("SELECT value FROM app_state WHERE key = ?", (key,))
@@ -129,7 +122,7 @@ class QuotaTracker:
             return default
 
     def prune_old_records(self, retention_days: int = 14):
-        """Prunes records older than retention period to keep database compact."""
+        """removes scrobble records older than the retention period."""
         cutoff = int(time.time()) - (retention_days * 86400)
         with self._connection() as conn:
             cursor = conn.cursor()

@@ -16,7 +16,7 @@ from src.spotify_client import SpotifyClient
 )
 class TestSpotifyLiveIntegration(unittest.TestCase):
     def test_live_single_track_fetch(self):
-        """Verifies real HTTP fetch and parsing against live open.spotify.com embed."""
+        """verify real HTTP fetch and parsing against live open.spotify.com embed."""
         client = SpotifyClient()
         tracks = client.fetch_sources(
             ["https://open.spotify.com/track/4cOdK2wGLETKBW3PvgPWqT"],

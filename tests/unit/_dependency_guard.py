@@ -4,10 +4,7 @@ from unittest.mock import MagicMock
 
 
 def ensure_dependencies_mocked():
-    """Guards against missing external dependencies (pylast, dotenv, requests)
-
-    so unit tests never fail with ImportError in clean or minimal environments.
-    """
+    """mock missing external packages so unit tests pass in minimal environments."""
     if "pylast" not in sys.modules:
         try:
             import pylast  # noqa: F401

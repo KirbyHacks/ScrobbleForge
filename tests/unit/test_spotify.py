@@ -323,25 +323,25 @@ class TestSpotifyParsingAndCache(unittest.TestCase):
             with open(cache_file, "w", encoding="utf-8") as f:
                 json.dump(data, f)
 
-            # Expired cache must return empty list
+            # expired cache must return empty list
             self.assertEqual(client.load_cache(sources=sources), [])
 
-            # Fresh cache within TTL must return cached tracks
-            data["saved_at"] = int(time.time()) - (1 * 3600)  # 1 hour old
+            # fresh cache within ttl must return cached tracks
+            data["saved_at"] = int(time.time()) - (1 * 3600)  # one hour old
             with open(cache_file, "w", encoding="utf-8") as f:
                 json.dump(data, f)
 
             self.assertEqual(len(client.load_cache(sources=sources)), 1)
 
     def test_extract_primary_artist_matrix(self):
-        # Solo artists with internal commas
+        # solo artists with internal commas
         self.assertEqual(extract_primary_artist("Tyler, The Creator"), "Tyler, The Creator")
 
-        # Complex band names with multiple commas or ampersands
+        # complex band names with multiple commas or ampersands
         self.assertEqual(extract_primary_artist("Earth, Wind & Fire"), "Earth, Wind & Fire")
         self.assertEqual(extract_primary_artist("Crosby, Stills, Nash & Young"), "Crosby, Stills, Nash & Young")
 
-        # Multi-artist delimited with non-breaking spaces (,\xa0 and ,\u00a0)
+        # multi-artist delimited with non-breaking spaces (,\xa0 and ,\u00a0)
         self.assertEqual(
             extract_primary_artist("Tyler, The Creator,\xa0A$AP Rocky"),
             "Tyler, The Creator",
@@ -355,12 +355,12 @@ class TestSpotifyParsingAndCache(unittest.TestCase):
             "Clipse",
         )
 
-        # Punctuation and symbols
+        # punctuation and symbols
         self.assertEqual(extract_primary_artist("AC/DC"), "AC/DC")
         self.assertEqual(extract_primary_artist("Sunn O)))"), "Sunn O)))")
         self.assertEqual(extract_primary_artist("Panic! At The Disco"), "Panic! At The Disco")
 
-        # Empty / fallback handling
+        # empty or fallback handling
         self.assertEqual(extract_primary_artist(""), "Unknown Artist")
         self.assertEqual(extract_primary_artist("   "), "Unknown Artist")
 

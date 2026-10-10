@@ -13,7 +13,7 @@ from src.config import AppConfig, ConfigError, load_config
 
 class TestConfigValidation(unittest.TestCase):
     def setUp(self):
-        # Clean environment copy for isolated testing
+        # clean environment copy for isolated testing
         self.orig_env = os.environ.copy()
 
     def tearDown(self):
@@ -21,8 +21,8 @@ class TestConfigValidation(unittest.TestCase):
         os.environ.update(self.orig_env)
 
     def test_default_config_parsing(self):
-        """Verifies default assignments when environment variables are omitted."""
-        # Clear engine & spotify specific env vars
+        """verify default assignments when environment variables are omitted."""
+        # clear engine and spotify specific env vars
         for k in [
             "SCROBBLE_MODE",
             "CUSTOM_INTERVAL_SECONDS",
@@ -49,7 +49,7 @@ class TestConfigValidation(unittest.TestCase):
         self.assertEqual(cfg.spotify.refresh_interval_hours, 12.0)
 
     def test_valid_custom_config_parsing(self):
-        """Verifies custom valid settings are parsed accurately."""
+        """verify custom valid settings are parsed accurately."""
         os.environ["SCROBBLE_MODE"] = "max_limit"
         os.environ["CUSTOM_INTERVAL_SECONDS"] = "45"
         os.environ["SHUFFLE"] = "false"
@@ -73,7 +73,7 @@ class TestConfigValidation(unittest.TestCase):
         self.assertEqual(cfg.spotify.refresh_interval_hours, 6.5)
 
     def test_invalid_scrobble_mode_raises_config_error(self):
-        """Verifies invalid SCROBBLE_MODE fails fast with actionable message."""
+        """verify invalid SCROBBLE_MODE fails fast with actionable message."""
         os.environ["SCROBBLE_MODE"] = "turbo_blast"
         with self.assertRaises(ConfigError) as ctx:
             AppConfig.from_env()
@@ -81,79 +81,79 @@ class TestConfigValidation(unittest.TestCase):
         self.assertIn("Expected one of: realistic, max_limit, custom_interval", str(ctx.exception))
 
     def test_non_numeric_integer_fields_raise_config_error(self):
-        """Verifies non-numeric values in integer fields raise ConfigError."""
-        # Non-numeric custom interval
+        """verify non-numeric values in integer fields raise ConfigError."""
+        # non-numeric custom interval
         os.environ["CUSTOM_INTERVAL_SECONDS"] = "banana"
         with self.assertRaises(ConfigError) as ctx:
             AppConfig.from_env()
         self.assertIn("CUSTOM_INTERVAL_SECONDS", str(ctx.exception))
         os.environ.pop("CUSTOM_INTERVAL_SECONDS")
 
-        # Zero custom interval (must be positive)
+        # zero custom interval (must be positive)
         os.environ["CUSTOM_INTERVAL_SECONDS"] = "0"
         with self.assertRaises(ConfigError) as ctx:
             AppConfig.from_env()
         self.assertIn("CUSTOM_INTERVAL_SECONDS", str(ctx.exception))
         os.environ.pop("CUSTOM_INTERVAL_SECONDS")
 
-        # Negative custom interval
+        # negative custom interval
         os.environ["CUSTOM_INTERVAL_SECONDS"] = "-10"
         with self.assertRaises(ConfigError) as ctx:
             AppConfig.from_env()
         self.assertIn("CUSTOM_INTERVAL_SECONDS", str(ctx.exception))
         os.environ.pop("CUSTOM_INTERVAL_SECONDS")
 
-        # Non-numeric max daily scrobbles
+        # non-numeric max daily scrobbles
         os.environ["MAX_DAILY_SCROBBLES"] = "unlimited"
         with self.assertRaises(ConfigError) as ctx:
             AppConfig.from_env()
         self.assertIn("MAX_DAILY_SCROBBLES", str(ctx.exception))
         os.environ.pop("MAX_DAILY_SCROBBLES")
 
-        # Exceeding max daily limit (2800 cap)
+        # exceeding max daily limit (2800 cap)
         os.environ["MAX_DAILY_SCROBBLES"] = "3500"
         with self.assertRaises(ConfigError) as ctx:
             AppConfig.from_env()
         self.assertIn("MAX_DAILY_SCROBBLES", str(ctx.exception))
         os.environ.pop("MAX_DAILY_SCROBBLES")
 
-        # Zero max daily limit
+        # zero max daily limit
         os.environ["MAX_DAILY_SCROBBLES"] = "0"
         with self.assertRaises(ConfigError) as ctx:
             AppConfig.from_env()
         self.assertIn("MAX_DAILY_SCROBBLES", str(ctx.exception))
 
     def test_non_numeric_float_fields_raise_config_error(self):
-        """Verifies non-numeric values in float fields raise ConfigError."""
-        # Non-numeric refresh interval
+        """verify non-numeric values in float fields raise ConfigError."""
+        # non-numeric refresh interval
         os.environ["SPOTIFY_REFRESH_INTERVAL_HOURS"] = "never"
         with self.assertRaises(ConfigError) as ctx:
             AppConfig.from_env()
         self.assertIn("SPOTIFY_REFRESH_INTERVAL_HOURS", str(ctx.exception))
         os.environ.pop("SPOTIFY_REFRESH_INTERVAL_HOURS")
 
-        # Non-positive refresh interval
+        # non-positive refresh interval
         os.environ["SPOTIFY_REFRESH_INTERVAL_HOURS"] = "0"
         with self.assertRaises(ConfigError) as ctx:
             AppConfig.from_env()
         self.assertIn("SPOTIFY_REFRESH_INTERVAL_HOURS", str(ctx.exception))
         os.environ.pop("SPOTIFY_REFRESH_INTERVAL_HOURS")
 
-        # Negative pause minimum
+        # negative pause minimum
         os.environ["INTER_TRACK_PAUSE_MIN"] = "-2.0"
         with self.assertRaises(ConfigError) as ctx:
             AppConfig.from_env()
         self.assertIn("INTER_TRACK_PAUSE_MIN", str(ctx.exception))
         os.environ.pop("INTER_TRACK_PAUSE_MIN")
 
-        # Non-numeric pause maximum
+        # non-numeric pause maximum
         os.environ["INTER_TRACK_PAUSE_MAX"] = "fast"
         with self.assertRaises(ConfigError) as ctx:
             AppConfig.from_env()
         self.assertIn("INTER_TRACK_PAUSE_MAX", str(ctx.exception))
 
     def test_pause_min_greater_than_max_raises_config_error(self):
-        """Verifies INTER_TRACK_PAUSE_MIN > INTER_TRACK_PAUSE_MAX raises ConfigError."""
+        """verify INTER_TRACK_PAUSE_MIN > INTER_TRACK_PAUSE_MAX raises ConfigError."""
         os.environ["INTER_TRACK_PAUSE_MIN"] = "10.0"
         os.environ["INTER_TRACK_PAUSE_MAX"] = "2.0"
         with self.assertRaises(ConfigError) as ctx:
@@ -161,7 +161,7 @@ class TestConfigValidation(unittest.TestCase):
         self.assertIn("cannot be greater than INTER_TRACK_PAUSE_MAX", str(ctx.exception))
 
     def test_boolean_nonsense_raises_config_error(self):
-        """Verifies nonsense boolean string values fail fast."""
+        """verify nonsense boolean string values fail fast."""
         for key in ["SHUFFLE", "LOOP", "UPDATE_NOW_PLAYING"]:
             os.environ[key] = "maybe"
             with self.assertRaises(ConfigError) as ctx:
@@ -170,7 +170,7 @@ class TestConfigValidation(unittest.TestCase):
             os.environ.pop(key)
 
     def test_placeholder_credentials_resolve_to_none(self):
-        """Verifies that template placeholders ('your_*', 'placeholder', empty strings) resolve to None."""
+        """verify that template placeholders ('your_*', 'placeholder', empty strings) resolve to None."""
         os.environ["LASTFM_API_KEY"] = "your_lastfm_api_key"
         os.environ["LASTFM_API_SECRET"] = "your_lastfm_api_secret"
         os.environ["LASTFM_USERNAME"] = "your_lastfm_username"
@@ -191,7 +191,7 @@ class TestConfigValidation(unittest.TestCase):
 
     @patch("src.config.load_dotenv")
     def test_session_key_present_with_username_none_boots_cleanly(self, mock_dotenv):
-        """Verifies that configuration with session_key present but username omitted/None boots cleanly without AttributeError."""
+        """verify that configuration with session_key present but username omitted/None boots cleanly without AttributeError."""
         os.environ["LASTFM_API_KEY"] = "valid_api_key"
         os.environ["LASTFM_API_SECRET"] = "valid_api_secret"
         os.environ["LASTFM_SESSION_KEY"] = "valid_session_key"

@@ -16,7 +16,7 @@ from src.models import Track
 
 
 def _build_embed_html(entity: dict) -> str:
-    """Builds a Next.js hydration payload enclosed inside HTML markup."""
+    """build a Next.js hydration payload enclosed inside HTML markup."""
     payload = {
         "props": {
             "pageProps": {
@@ -36,10 +36,10 @@ def _build_embed_html(entity: dict) -> str:
 
 
 class TestSpotifyEmbedParser(unittest.TestCase):
-    """Stateless unit tests for SpotifyEmbedParser with ZERO requests mocking."""
+    """stateless unit tests for SpotifyEmbedParser without requests mocking."""
 
     def test_single_track_html_payload(self):
-        """Verifies parsing of single track HTML payload into standardized Track model."""
+        """verify parsing of single track HTML payload into standardized Track model."""
         entity = {
             "title": "Bohemian Rhapsody",
             "name": "Bohemian Rhapsody",
@@ -63,7 +63,7 @@ class TestSpotifyEmbedParser(unittest.TestCase):
         self.assertEqual(track.source_name, "Single Track")
 
     def test_single_track_subtitle_fallback(self):
-        """Verifies fallback to subtitle parsing when artists list is absent."""
+        """verify fallback to subtitle parsing when artists list is absent."""
         entity = {
             "title": "Under Pressure",
             "subtitle": "Queen,\xa0David Bowie",
@@ -80,7 +80,7 @@ class TestSpotifyEmbedParser(unittest.TestCase):
         self.assertEqual(tracks[0].album_artist, "Queen")
 
     def test_album_html_payload(self):
-        """Verifies parsing of album HTML with multiple tracks in trackList."""
+        """verify parsing of album HTML with multiple tracks in trackList."""
         entity = {
             "name": "A Night at the Opera",
             "type": "album",
@@ -131,7 +131,7 @@ class TestSpotifyEmbedParser(unittest.TestCase):
         self.assertEqual(tracks[2].track_number, 3)
 
     def test_playlist_html_payload(self):
-        """Verifies parsing of playlist HTML payload with multiple tracks."""
+        """verify parsing of playlist HTML payload with multiple tracks."""
         entity = {
             "name": "Synthwave Chill",
             "type": "playlist",
@@ -166,7 +166,7 @@ class TestSpotifyEmbedParser(unittest.TestCase):
         self.assertEqual(tracks[1].source_name, "Synthwave Chill")
 
     def test_playlist_payload_with_pagination_and_nested_tracks(self):
-        """Verifies playlist parsing when tracks are wrapped in tracks.items with pagination."""
+        """verify playlist parsing when tracks are wrapped in tracks.items with pagination."""
         entity = {
             "name": "Weekly Mix",
             "type": "playlist",
@@ -211,7 +211,7 @@ class TestSpotifyEmbedParser(unittest.TestCase):
         self.assertEqual(tracks[1].duration_ms, 215000)
 
     def test_direct_json_string_parsing(self):
-        """Verifies direct JSON parsing without requiring HTML script tags."""
+        """verify direct JSON parsing without requiring HTML script tags."""
         payload = {
             "props": {
                 "pageProps": {
@@ -238,34 +238,34 @@ class TestSpotifyEmbedParser(unittest.TestCase):
         self.assertEqual(tracks[0].spotify_id, "direct123")
 
     def test_missing_next_data_raises_ingestion_error(self):
-        """Verifies SpotifyIngestionError when HTML contains no __NEXT_DATA__ tag."""
+        """verify SpotifyIngestionError when HTML contains no __NEXT_DATA__ tag."""
         html = "<html><head><title>Error</title></head><body><h1>404 Not Found</h1></body></html>"
         with self.assertRaises(SpotifyIngestionError) as ctx:
             SpotifyEmbedParser.parse(html)
         self.assertIn("No metadata found", str(ctx.exception))
 
     def test_malformed_json_raises_ingestion_error(self):
-        """Verifies SpotifyIngestionError when JSON in __NEXT_DATA__ is malformed."""
+        """verify SpotifyIngestionError when JSON in __NEXT_DATA__ is malformed."""
         html = '<html><head><script id="__NEXT_DATA__" type="application/json">{ broken: json </script></head></html>'
         with self.assertRaises(SpotifyIngestionError) as ctx:
             SpotifyEmbedParser.parse(html)
         self.assertIn("Failed to parse embed JSON", str(ctx.exception))
 
     def test_empty_or_whitespace_content_raises_ingestion_error(self):
-        """Verifies SpotifyIngestionError when content is empty or whitespace."""
+        """verify SpotifyIngestionError when content is empty or whitespace."""
         with self.assertRaises(SpotifyIngestionError):
             SpotifyEmbedParser.parse("")
         with self.assertRaises(SpotifyIngestionError):
             SpotifyEmbedParser.parse("   \n\t  ")
 
     def test_empty_entity_payload_returns_empty_list(self):
-        """Verifies returning empty list when entity dictionary is empty."""
+        """verify returning empty list when entity dictionary is empty."""
         html = _build_embed_html({})
         tracks = SpotifyEmbedParser.parse(html)
         self.assertEqual(tracks, [])
 
     def test_missing_fields_defaults(self):
-        """Verifies graceful fallback defaults for missing duration, album artist, and artist."""
+        """verify graceful fallback defaults for missing duration, album artist, and artist."""
         entity = {
             "title": "",
             "name": None,
@@ -280,19 +280,14 @@ class TestSpotifyEmbedParser(unittest.TestCase):
 
         self.assertEqual(len(tracks), 1)
         track = tracks[0]
-        # Title fallback
         self.assertEqual(track.title, "Unknown Track")
-        # Artist fallback
         self.assertEqual(track.artist, "Unknown Artist")
-        # Album artist fallback
         self.assertEqual(track.album_artist, "Unknown Artist")
-        # Duration fallback (180,000 ms = 3 mins)
         self.assertEqual(track.duration_ms, 180000)
-        # ID fallback
         self.assertEqual(track.spotify_id, "fallback_id")
 
     def test_duration_normalization_variants(self):
-        """Verifies normalize_duration handles various positive, negative, null, and malformed inputs."""
+        """verify normalize_duration handles various positive, negative, null, and malformed inputs."""
         self.assertEqual(SpotifyEmbedParser.normalize_duration(210000), 210000)
         self.assertEqual(SpotifyEmbedParser.normalize_duration("195000"), 195000)
         self.assertEqual(SpotifyEmbedParser.normalize_duration(None), 180000)
@@ -301,26 +296,19 @@ class TestSpotifyEmbedParser(unittest.TestCase):
         self.assertEqual(SpotifyEmbedParser.normalize_duration("invalid"), 180000)
 
     def test_artist_normalization_variants(self):
-        """Verifies extract_artist handles lists of dicts, lists of strings, dicts, strings, and subtitles."""
-        # List of dicts
+        """verify extract_artist handles lists of dicts, lists of strings, dicts, strings, and subtitles."""
         self.assertEqual(SpotifyEmbedParser.extract_artist([{"name": "Artist A"}]), "Artist A")
-        # List of strings
         self.assertEqual(SpotifyEmbedParser.extract_artist(["Artist B"]), "Artist B")
-        # Single dict
         self.assertEqual(SpotifyEmbedParser.extract_artist({"name": "Artist C"}), "Artist C")
-        # Plain string
         self.assertEqual(SpotifyEmbedParser.extract_artist("Artist D"), "Artist D")
-        # Subtitle with non-breaking space delimiter
         self.assertEqual(
             SpotifyEmbedParser.extract_artist(None, subtitle="Daft Punk,\xa0Pharrell Williams"),
             "Daft Punk",
         )
-        # Empty/None fallback
         self.assertEqual(SpotifyEmbedParser.extract_artist([], subtitle=""), "Unknown Artist")
 
     def test_type_inference_without_explicit_entity_type(self):
-        """Verifies automatic detection of entity type when entity_type is omitted."""
-        # Track inference
+        """verify automatic detection of entity type when entity_type is omitted."""
         track_html = _build_embed_html({
             "title": "Solo Track",
             "artists": [{"name": "Solo Artist"}],
@@ -331,7 +319,6 @@ class TestSpotifyEmbedParser(unittest.TestCase):
         self.assertEqual(len(tracks), 1)
         self.assertEqual(tracks[0].title, "Solo Track")
 
-        # Album inference
         album_html = _build_embed_html({
             "name": "Solo Album",
             "type": "album",
@@ -341,7 +328,6 @@ class TestSpotifyEmbedParser(unittest.TestCase):
         self.assertEqual(len(tracks), 1)
         self.assertEqual(tracks[0].album, "Solo Album")
 
-        # Playlist inference
         playlist_html = _build_embed_html({
             "name": "Solo Playlist",
             "type": "playlist",

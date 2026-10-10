@@ -59,7 +59,7 @@ class TestAuthResolution(unittest.TestCase):
         auth_url = "https://www.last.fm/api/auth/?api_key=test&token=abc"
         stop_event = threading.Event()
 
-        # Simulate Error 14 on first call, success on second call
+        # simulate error 14 on first call, success on second call
         err14 = pylast.WSError(network=None, status="14", details="This token has not been authorized")
         mock_skg.get_web_auth_session_key_username.side_effect = [
             err14,
@@ -118,7 +118,7 @@ class TestAuthResolution(unittest.TestCase):
 
     @patch("pylast.LastFMNetwork")
     def test_client_initialization_with_username_none_boots_cleanly_and_autodetects(self, mock_network_cls):
-        """Verifies that LastFMClient boots without AttributeError when username=None and auto-detects from session."""
+        """verify that LastFMClient boots without AttributeError when username=None and auto-detects from session."""
         mock_network = MagicMock()
         mock_user = MagicMock()
         mock_user.get_name.return_value = "autodetected_user"
@@ -137,7 +137,7 @@ class TestAuthResolution(unittest.TestCase):
 
     @patch("pylast.LastFMNetwork")
     def test_client_initialization_with_none_user_raises_auth_error(self, mock_network_cls):
-        """Verifies that LastFMClient raises LastFMAuthError if authenticated user lookup returns None."""
+        """verify that LastFMClient raises LastFMAuthError if authenticated user lookup returns None."""
         mock_network = MagicMock()
         mock_network.get_authenticated_user.return_value = None
         mock_network_cls.return_value = mock_network
@@ -152,7 +152,7 @@ class TestAuthResolution(unittest.TestCase):
 
     @patch("pylast.LastFMNetwork")
     def test_client_initialization_with_invalid_session_error_raises_auth_error(self, mock_network_cls):
-        """Verifies that LastFMClient raises LastFMAuthError on initialization if network throws code 9 WSError."""
+        """verify that LastFMClient raises LastFMAuthError on initialization if network throws code 9 WSError."""
         mock_network = MagicMock()
         err9 = pylast.WSError(network=None, status="9", details="Invalid session key - Please re-authenticate")
         mock_network.get_authenticated_user.side_effect = err9
@@ -169,7 +169,7 @@ class TestAuthResolution(unittest.TestCase):
 
     @patch("pylast.LastFMNetwork")
     def test_client_initialization_with_network_error_raises_temporary_error(self, mock_network_cls):
-        """Verifies that network errors during session verification raise LastFMTemporaryError instead of LastFMAuthError."""
+        """verify that network errors during session verification raise LastFMTemporaryError instead of LastFMAuthError."""
         mock_network = MagicMock()
         mock_network.get_authenticated_user.side_effect = pylast.NetworkError(
             None, Exception("Connection timed out")
@@ -206,7 +206,7 @@ class TestAuthResolution(unittest.TestCase):
 
     @patch("pylast.LastFMNetwork")
     def test_client_initialization_with_username_none_and_empty_user_name_stays_none(self, mock_network_cls):
-        """Verifies that LastFMClient stays username=None if authenticated user has no name returned."""
+        """verify that LastFMClient stays username=None if authenticated user has no name returned."""
         mock_network = MagicMock()
         mock_user = MagicMock()
         mock_user.get_name.return_value = None

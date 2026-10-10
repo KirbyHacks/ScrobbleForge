@@ -22,7 +22,7 @@ class TestQuotaTracker(unittest.TestCase):
     def test_rolling_24h_quota_and_pause_calculation(self):
         now = 1700000000  # fixed epoch
 
-        # Under limit
+        # under limit
         self.tracker.record_scrobble("Artist A", "Track 1", timestamp=now - 3600)
         self.tracker.record_scrobble("Artist B", "Track 2", timestamp=now - 1800)
 
@@ -33,14 +33,14 @@ class TestQuotaTracker(unittest.TestCase):
         self.assertTrue(allowed)
         self.assertEqual(wait_sec, 0)
 
-        # Exceed limit: limit = 2, count = 3
+        # exceed limit: limit = 2, count = 3
         self.tracker.record_scrobble("Artist C", "Track 3", timestamp=now - 900)
         count = self.tracker.get_rolling_24h_count(now=now)
         self.assertEqual(count, 3)
 
         allowed_capped, wait_capped = self.tracker.can_scrobble(max_daily_limit=2, now=now)
         self.assertFalse(allowed_capped)
-        # Admission requires count < limit, so two rows must expire; the second-oldest
+        # admission requires count < limit, so two rows must expire; the second-oldest
         # row is 1,800 seconds old and expires in 84,600 seconds.
         self.assertEqual(wait_capped, 84600)
 
@@ -57,19 +57,19 @@ class TestQuotaTracker(unittest.TestCase):
     def test_exact_limit_thresholds(self):
         now = 1700000000
 
-        # Scenario 1: count < limit (e.g. 1 < 2)
+        # scenario 1: count < limit (e.g. 1 < 2)
         self.tracker.record_scrobble("Artist A", "Track 1", timestamp=now - 1000)
         allowed, wait_sec = self.tracker.can_scrobble(max_daily_limit=2, now=now)
         self.assertTrue(allowed)
         self.assertEqual(wait_sec, 0)
 
-        # Scenario 2: count == limit (e.g. 2 == 2) -> at threshold, cannot scrobble
+        # scenario 2: count == limit (e.g. 2 == 2) -> at threshold, cannot scrobble
         self.tracker.record_scrobble("Artist B", "Track 2", timestamp=now - 500)
         allowed, wait_sec = self.tracker.can_scrobble(max_daily_limit=2, now=now)
         self.assertFalse(allowed)
         self.assertEqual(wait_sec, (now - 1000 + 86400) - now)
 
-        # Scenario 3: count > limit (e.g. 3 > 2): two rows must expire
+        # scenario 3: count > limit (e.g. 3 > 2): two rows must expire
         self.tracker.record_scrobble("Artist C", "Track 3", timestamp=now - 200)
         allowed, wait_sec = self.tracker.can_scrobble(max_daily_limit=2, now=now)
         self.assertFalse(allowed)
@@ -78,7 +78,7 @@ class TestQuotaTracker(unittest.TestCase):
 
     def test_duplicate_timestamps_deterministic_ordering(self):
         now = 1700000000
-        # Two tracks recorded with identical timestamp
+        # two tracks recorded with identical timestamp
         ts_same = now - 7200
         self.tracker.record_scrobble("Artist A", "Track 1", timestamp=ts_same)  # id 1
         self.tracker.record_scrobble("Artist B", "Track 2", timestamp=ts_same)  # id 2
@@ -101,11 +101,11 @@ class TestQuotaTracker(unittest.TestCase):
         self.tracker.record_scrobble("A", "at-cutoff", timestamp=now - 86400)
         self.tracker.record_scrobble("A", "inside", timestamp=now - 86399)
         self.assertEqual(self.tracker.get_rolling_24h_count(now=now), 2)
-        # At the exact cutoff the record is included, so with limit 2 we're capped.
+        # at the exact cutoff the record is included, so with limit 2 we are capped
         allowed, wait_sec = self.tracker.can_scrobble(max_daily_limit=2, now=now)
         self.assertFalse(allowed)
         self.assertEqual(wait_sec, 1)
-        # One second later, the first record is outside the inclusive window.
+        # one second later, the first record is outside the inclusive window
         self.assertEqual(self.tracker.get_rolling_24h_count(now=now + 1), 1)
         allowed, wait_sec = self.tracker.can_scrobble(max_daily_limit=2, now=now + 1)
         self.assertTrue(allowed)

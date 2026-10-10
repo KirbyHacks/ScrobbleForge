@@ -1,0 +1,7 @@
+{
+  "database": "dolt",
+  "backend": "dolt",
+  "dolt_mode": "embedded",
+  "dolt_database": "ScrobbleForge",
+  "project_id": "3140e1a9-c355-405e-9065-59da4e131d0a"
+}

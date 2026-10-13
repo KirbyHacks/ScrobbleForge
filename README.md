@@ -1,6 +1,6 @@
 # ScrobbleForge
 
-Current version: **v1.1.0**.
+Current version: **v1.1.1**.
 
 A resilient, background-oriented Last.fm scrobbler designed for continuous, unattended execution. Ingests full Spotify playlists, complete albums, single tracks, as well as public YouTube and YouTube Music playlists and tracks without requiring Premium or developer credentials, featuring realistic playback simulation, non-overlapping historical timeline synthesis, and configurable rolling 24-hour rate limiting.
 
@@ -205,7 +205,7 @@ ScrobbleForge ingests music metadata through provider-agnostic source clients th
   - Ambiguous videos where music artist cannot be determined with adequate confidence are omitted rather than fabricating metadata.
   - Channels (`/@channel/videos`) and YouTube Shorts (`/shorts/...`) are out of initial scope.
 - **Missing Metadata**: The provider preserves unknown album, album artist, track number, and duration as unknown. The legacy playback engine uses a 180-second pacing estimate when duration is missing; this is not a recovered duration. Source ingestion preserves known album artist and track numbers rather than substituting queue positions.
-- **Cache Upgrade**: v1.1.0 uses YouTube normalization schema 3. Older YouTube caches are refetched on the next start so incorrect artist/title mappings are not retained. Forced refresh also updates the disk cache.
+- **Cache Upgrade**: v1.1.1 uses YouTube cache version 4. Older caches are refreshed on the next start to update album names and version labels. A forced refresh also updates the disk cache.
 - **Access Limits**: Public references are supported; access remains subject to upstream availability. The default YouTubei integration uses unofficial endpoints and may need updates when their responses change. Supplying `YOUTUBE_API_KEY` selects Data API v3 rather than an automatic fallback after a YouTubei error.
 
 ---
@@ -263,7 +263,7 @@ To build a source archive from the current checkout, including uncommitted sourc
 python scripts/build_release.py
 ```
 
-This produces `dist/scrobbleforge-1.1.0-source.zip` and a SHA-256 checksum. The archive includes source, offline tests, the README, license, and Docker/configuration templates. Credentials and local state are excluded.
+This produces `dist/scrobbleforge-1.1.1-source.zip` and a SHA-256 checksum. The archive includes source, offline tests, the README, license, and Docker/configuration templates. Credentials and local state are excluded.
 
 ---
 

@@ -1,3 +1,5 @@
+import base64
+import binascii
 import csv
 import hashlib
 import json
@@ -15,6 +17,11 @@ _USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
     "Chrome/124.0.0.0 Safari/537.36"
+)
+
+_METADATA_USER_AGENT = (
+    "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) "
+    "AppleWebKit/605.1.15 Version/17.0 Mobile/15E148 Safari/604.1"
 )
 
 def extract_primary_artist(raw_subtitle: str) -> str:
@@ -182,13 +189,13 @@ class SpotifyEmbedParser:
         if "spotify:playlist:" in uri:
             return "playlist"
 
-        if "album_type" in entity or entity.get("album"):
+        if "album_type" in entity:
             return "album"
 
         if "trackList" in entity or "tracks" in entity:
             return "playlist"
 
-        if "duration" in entity or "duration_ms" in entity or "isrc" in entity:
+        if "duration" in entity or "duration_ms" in entity or "isrc" in entity or entity.get("album"):
             return "track"
 
         return "playlist"
@@ -386,6 +393,80 @@ class SpotifyClient:
         self.cache_path = Path(cache_path) if cache_path else None
         self.retries = max(1, retries)
         self.ttl_seconds = float(ttl_hours) * 3600.0
+        self._album_metadata: Dict[str, Tuple[float, Optional[dict]]] = {}
+        self._metadata_retry_after = 0.0
+
+    @staticmethod
+    def _track_page_metadata(content: str, track: Track) -> Optional[dict]:
+        """read the album for this track id."""
+        match = re.search(r'<script\b[^>]*\bid="initialState"[^>]*>(.*?)</script>', content, re.DOTALL)
+        if not match:
+            return None
+        state = json.loads(base64.b64decode(match.group(1).strip(), validate=True))
+        uri = f"spotify:track:{track.spotify_id}"
+        if not isinstance(state, dict) or not isinstance(state.get("entities"), dict):
+            return None
+        items = state["entities"].get("items")
+        if not isinstance(items, dict):
+            return None
+        item = items.get(uri)
+        if not isinstance(item, dict) or item.get("uri") != uri or item.get("__typename") != "Track":
+            return None
+        title = item.get("name", "")
+        first_artist = item.get("firstArtist")
+        artists = first_artist.get("items", []) if isinstance(first_artist, dict) else []
+        if not isinstance(title, str) or not isinstance(artists, list) or not artists or not isinstance(artists[0], dict):
+            return None
+        profile = artists[0].get("profile")
+        artist = profile.get("name", "") if isinstance(profile, dict) else ""
+        if not isinstance(artist, str):
+            return None
+        if title.casefold() != track.title.casefold() or artist.casefold() != track.artist.casefold():
+            return None
+        album = item.get("albumOfTrack", {})
+        if not isinstance(album, dict) or not isinstance(album.get("name"), str) or not isinstance(album.get("uri"), str):
+            return None
+        name = album.get("name", "").strip()
+        if not name or not re.fullmatch(r"spotify:album:[A-Za-z0-9]{22}", album.get("uri", "")):
+            return None
+        number = item.get("trackNumber")
+        return {"title": title, "artist": artist, "album": name,
+                "track_number": number if isinstance(number, int) and not isinstance(number, bool) and number > 0 else None}
+
+    def enrich_track_metadata(self, track: Track) -> None:
+        """look up a missing album before playback and reuse the result."""
+        if track.album or track.provider_id not in (None, "spotify"):
+            return
+        if not track.spotify_id or not re.fullmatch(r"[A-Za-z0-9]{22}", track.spotify_id):
+            return
+        now = time.monotonic()
+        cached = self._album_metadata.get(track.spotify_id)
+        if cached is not None and cached[0] > now:
+            metadata = cached[1]
+        else:
+            if now < self._metadata_retry_after:
+                return
+            metadata = None
+            try:
+                response = requests.get(
+                    f"https://open.spotify.com/track/{track.spotify_id}",
+                    headers={"User-Agent": _METADATA_USER_AGENT, "Accept-Language": "en-US,en;q=0.9"},
+                    timeout=10,
+                )
+                if response.status_code in (401, 403, 429):
+                    self._metadata_retry_after = now + 900
+                response.raise_for_status()
+                metadata = self._track_page_metadata(response.text, track)
+            except (requests.RequestException, ValueError, binascii.Error) as exc:
+                logger.warning(f"[METADATA] Spotify album lookup failed for {track.display_name}: {type(exc).__name__}")
+            self._album_metadata[track.spotify_id] = (
+                now + (self.ttl_seconds if metadata else 300), metadata
+            )
+        if metadata and metadata["title"].casefold() == track.title.casefold() and metadata["artist"].casefold() == track.artist.casefold():
+            track.album = metadata["album"]
+            if metadata["track_number"] is not None:
+                track.track_number = metadata["track_number"]
+            logger.info(f"[METADATA] {track.display_name} -> album: {track.album}")
 
     @staticmethod
     def parse_spotify_uri(uri_or_url: str) -> Tuple[str, str]:

@@ -4,7 +4,7 @@ import sqlite3
 import sys
 import threading
 import time
-from typing import Optional, Any
+from typing import Optional, Any, Tuple
 import requests
 
 try:
@@ -73,6 +73,7 @@ class ScrobblerEngine:
         self.circuit_breaker_threshold = max(1, circuit_breaker_threshold)
         self.circuit_broken = False
         self.pending_track: Optional[Track] = None
+        self._realistic_submission: Optional[Tuple[Track, int, float]] = None
 
         self.virtual_timeline_cursor: Optional[int] = None
         self._init_virtual_timeline()
@@ -119,6 +120,10 @@ class ScrobblerEngine:
                     self.pending_track = track
                 else:
                     track = self.pending_track
+
+                enrich_metadata = getattr(self.source_service, "enrich_track_metadata", None)
+                if callable(enrich_metadata):
+                    enrich_metadata(track)
 
                 if mode == "realistic":
                     resolved = self._execute_realistic_step(track)
@@ -188,27 +193,35 @@ class ScrobblerEngine:
                 return
 
     def _execute_realistic_step(self, track: Track) -> bool:
-        track_start_time = int(time.time())
+        if self.stop_event.is_set():
+            return False
+
         duration_sec = track.duration_sec
         # last.fm requires a minimum 30s track duration
         scrobble_duration = max(LASTFM_MIN_SCROBBLE_DURATION_SEC, duration_sec)
-
-        if self.cfg.engine.update_now_playing:
-            self.lastfm.update_now_playing(track)
 
         # scrobble at min(50%, 240s) with 30s platform floor
         scrobble_threshold = max(LASTFM_MIN_SCROBBLE_DURATION_SEC, min(scrobble_duration // 2, 240))
         remaining_duration = max(0, duration_sec - scrobble_threshold)
 
-        logger.info(f"[NOW PLAYING] {track.display_name} ({track.formatted_duration}) -> scrobble at 50%")
+        if self._realistic_submission is None or self._realistic_submission[0] is not track:
+            track_start_time = int(time.time())
+            if self.cfg.engine.update_now_playing:
+                self.lastfm.update_now_playing(track)
 
-        if self.stop_event.wait(timeout=scrobble_threshold):
-            return False
+            logger.info(f"[PLAYBACK] {track.display_name} ({track.formatted_duration}) -> scrobble at 50%")
+            if self.stop_event.wait(timeout=scrobble_threshold):
+                return False
+            # retry with the same start time without replaying the track.
+            self._realistic_submission = (track, track_start_time, time.monotonic())
+
+        _, track_start_time, threshold_time = self._realistic_submission
 
         if self.stop_event.is_set():
             return False
 
         scrobbled = self.lastfm.scrobble(track, timestamp=track_start_time)
+        remaining_duration = max(0, remaining_duration - (time.monotonic() - threshold_time))
         now = int(time.time())
         if scrobbled:
             self.tracker.record_scrobble(track.artist, track.title, timestamp=now)
@@ -219,6 +232,7 @@ class ScrobblerEngine:
         else:
             logger.warning(f"[SCROBBLE IGNORED] Last.fm ignored scrobble for {track.display_name}")
 
+        self._realistic_submission = None
         if remaining_duration > 0:
             if self.stop_event.wait(timeout=remaining_duration):
                 return True

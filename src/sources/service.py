@@ -86,3 +86,8 @@ class SourceIngestionService:
         for ct in canonical_tracks:
             legacy_tracks.append(to_legacy_track(ct))
         return legacy_tracks
+
+    def enrich_track_metadata(self, track: Track) -> None:
+        """look up a missing album for the next track."""
+        if track.provider_id == "spotify" and track.spotify_id and not track.album:
+            self.spotify_client.enrich_track_metadata(track)

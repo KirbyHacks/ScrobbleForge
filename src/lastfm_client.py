@@ -168,7 +168,7 @@ class LastFMClient:
     def update_now_playing(self, track: Track) -> bool:
         """updates the currently playing track on last.fm."""
         if not self.network:
-            return False
+            raise LastFMAuthError("Last.fm client is not authenticated.")
 
         scrobble_duration = max(LASTFM_MIN_SCROBBLE_DURATION_SEC, track.duration_sec)
 
@@ -182,7 +182,17 @@ class LastFMClient:
                 duration=scrobble_duration,
             )
             return True
-        except Exception as e:
+        except pylast.WSError as e:
+            status = str(e.status)
+            if status in ("4", "9", "10"):
+                raise LastFMAuthError(f"Now Playing authentication failed ({status}): {e.details}") from e
+            if status == "29":
+                raise LastFMRateLimitError(f"Now Playing rate limit exceeded: {e.details}") from e
+            if status not in ("11", "16", "26"):
+                raise
+            logger.warning(f"Failed to update Now Playing: {e}")
+            return False
+        except (pylast.NetworkError, pylast.MalformedResponseError, ConnectionError, TimeoutError, OSError) as e:
             logger.warning(f"Failed to update Now Playing: {e}")
             return False
 

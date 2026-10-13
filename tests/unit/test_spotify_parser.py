@@ -38,6 +38,31 @@ def _build_embed_html(entity: dict) -> str:
 class TestSpotifyEmbedParser(unittest.TestCase):
     """stateless unit tests for spotifyembedparser without requests mocking."""
 
+    def test_track_with_album_without_type_or_uri(self):
+        entity = {
+            "name": "Song (Live)",
+            "artists": [{"name": "Artist"}],
+            "album": {"name": "Live Album"},
+            "duration_ms": 180000,
+        }
+        tracks = SpotifyEmbedParser.parse(json.dumps(entity))
+        self.assertEqual(len(tracks), 1)
+        self.assertEqual(tracks[0].title, "Song (Live)")
+        self.assertEqual(tracks[0].album, "Live Album")
+        self.assertEqual(tracks[0].duration_ms, 180000)
+
+    def test_playlist_album_field_does_not_change_its_type(self):
+        entity = {
+            "name": "Playlist",
+            "album": {"name": "Other Album"},
+            "trackList": [{"title": "Song", "artists": [{"name": "Artist"}]}],
+        }
+        tracks = SpotifyEmbedParser.parse(json.dumps(entity))
+        self.assertEqual(len(tracks), 1)
+        self.assertEqual(tracks[0].title, "Song")
+        self.assertEqual(tracks[0].source_name, "Playlist")
+        self.assertEqual(tracks[0].album, "")
+
     def test_single_track_html_payload(self):
         """verify parsing of single track html payload into standardized track model."""
         entity = {

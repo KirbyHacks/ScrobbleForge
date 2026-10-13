@@ -117,7 +117,7 @@ class TestYouTubeMetadataNormalizer(unittest.TestCase):
             ("Song Title (Remastered 2011)", "Song Title (Remastered 2011)"),
             ("Song Title (Live at Wembley)", "Song Title (Live at Wembley)"),
             ("Song Title (Official Visualizer)", "Song Title"),
-            ("Song Title (Clean Version)", "Song Title"),
+            ("Song Title (Clean Version)", "Song Title (Clean Version)"),
             ("Redbone (Live From The Tonight Show Starring Jimmy Fallon)", "Redbone (Live From The Tonight Show Starring Jimmy Fallon)"),
             ("Dear April (Side A - Acoustic)", "Dear April (Side A - Acoustic)"),
             ("Something (Remix)", "Something (Remix)"),
@@ -233,7 +233,7 @@ class TestYouTubeAdapterIngestion(unittest.TestCase):
                                                                                 "runs": [
                                                                                     {"text": "Kavinsky"},
                                                                                     {"text": " • "},
-                                                                                    {"text": "OutRun"},
+                                                                                    {"text": "OutRun", "navigationEndpoint": {"browseEndpoint": {"browseEndpointContextSupportedConfigs": {"browseEndpointContextMusicConfig": {"pageType": "MUSIC_PAGE_TYPE_ALBUM"}}}}},
                                                                                     {"text": " • "},
                                                                                     {"text": "4:19"},
                                                                                 ]

@@ -1,12 +1,13 @@
-.git
-.github
-.venv
-venv
-__pycache__
-*.pyc
-*.pyo
-*.pyd
-.env
-data/
-*.db
-*.log
+# include only the files needed to build the image
+**
+!Dockerfile
+!.dockerignore
+!requirements.txt
+!auth_helper.py
+!.env.example
+!src/
+!src/**/
+!src/**/*.py
+src/**/.*
+src/**/.*/**
+src/**/__pycache__/

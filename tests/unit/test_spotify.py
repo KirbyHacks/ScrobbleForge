@@ -25,7 +25,7 @@ from src.models import Track
 
 
 def _build_embed_html(entity: dict) -> str:
-    """Builds a realistic Next.js hydration payload inside HTML markup."""
+    """builds a realistic next.js hydration payload inside html markup."""
     payload = {
         "props": {
             "pageProps": {
@@ -46,29 +46,29 @@ def _build_embed_html(entity: dict) -> str:
 
 class TestSpotifyParsingAndCache(unittest.TestCase):
     def test_parse_spotify_uri(self):
-        # Web playlist URL
+        # web playlist url
         t, id_ = SpotifyClient.parse_spotify_uri("https://open.spotify.com/playlist/37i9dQZF1DXcBWIGoYBM5M?si=abcd123")
         self.assertEqual(t, "playlist")
         self.assertEqual(id_, "37i9dQZF1DXcBWIGoYBM5M")
 
-        # URI album
+        # uri album
         t, id_ = SpotifyClient.parse_spotify_uri("spotify:album:4m2880jivSbbyEGAKfITCa")
         self.assertEqual(t, "album")
         self.assertEqual(id_, "4m2880jivSbbyEGAKfITCa")
 
-        # Track URL
+        # track url
         t, id_ = SpotifyClient.parse_spotify_uri("https://open.spotify.com/track/4cOdK2wGLETKBW3PvgPWqT?si=xyz")
         self.assertEqual(t, "track")
         self.assertEqual(id_, "4cOdK2wGLETKBW3PvgPWqT")
 
-        # Bare ID defaults to playlist
+        # bare id defaults to playlist
         t, id_ = SpotifyClient.parse_spotify_uri("37i9dQZF1DXcBWIGoYBM5M")
         self.assertEqual(t, "playlist")
         self.assertEqual(id_, "37i9dQZF1DXcBWIGoYBM5M")
 
     @patch("src.spotify_client.requests.get")
     def test_single_track_fetch(self, mock_get):
-        """Zero-network deterministic single track embed fetch with mock Next.js payload."""
+        """zero-network deterministic single track embed fetch with mock next.js payload."""
         mock_entity = {
             "title": "Never Gonna Give You Up",
             "name": "Never Gonna Give You Up",
@@ -101,7 +101,7 @@ class TestSpotifyParsingAndCache(unittest.TestCase):
 
     @patch("src.spotify_client.requests.get")
     def test_single_track_fetch_subtitle_fallback(self, mock_get):
-        """Single track embed parsing using subtitle field when artists array is absent."""
+        """single track embed parsing using subtitle field when artists array is absent."""
         mock_entity = {
             "title": "Never Gonna Give You Up",
             "subtitle": "Rick Astley",
@@ -126,7 +126,7 @@ class TestSpotifyParsingAndCache(unittest.TestCase):
 
     @patch("src.spotify_client.requests.get")
     def test_playlist_fetch(self, mock_get):
-        """Zero-network deterministic playlist embed fetch with multiple tracks."""
+        """zero-network deterministic playlist embed fetch with multiple tracks."""
         mock_entity = {
             "name": "Synthwave Chill",
             "type": "playlist",
@@ -184,7 +184,7 @@ class TestSpotifyParsingAndCache(unittest.TestCase):
 
     @patch("src.spotify_client.requests.get")
     def test_album_fetch(self, mock_get):
-        """Zero-network deterministic album embed fetch."""
+        """zero-network deterministic album embed fetch."""
         mock_entity = {
             "name": "Random Access Memories",
             "type": "album",
@@ -226,7 +226,7 @@ class TestSpotifyParsingAndCache(unittest.TestCase):
 
     @patch("src.spotify_client.requests.get")
     def test_fetch_embed_tracks_http_error(self, mock_get):
-        """Verifies SpotifyIngestionError when requests.get fails."""
+        """verifies spotifyingestionerror when requests.get fails."""
         mock_get.side_effect = requests.RequestException("Connection refused")
         client = SpotifyClient()
         with self.assertRaises(SpotifyIngestionError):
@@ -234,7 +234,7 @@ class TestSpotifyParsingAndCache(unittest.TestCase):
 
     @patch("src.spotify_client.requests.get")
     def test_fetch_embed_tracks_missing_next_data(self, mock_get):
-        """Verifies SpotifyIngestionError when embed page has no __NEXT_DATA__ script tag."""
+        """verifies spotifyingestionerror when embed page has no __next_data__ script tag."""
         mock_resp = MagicMock()
         mock_resp.status_code = 200
         mock_resp.text = "<html><body><h1>Embed Not Found</h1></body></html>"
@@ -247,7 +247,7 @@ class TestSpotifyParsingAndCache(unittest.TestCase):
 
     @patch("src.spotify_client.requests.get")
     def test_fetch_embed_tracks_malformed_json(self, mock_get):
-        """Verifies SpotifyIngestionError when embed payload contains broken JSON."""
+        """verifies spotifyingestionerror when embed payload contains broken json."""
         mock_resp = MagicMock()
         mock_resp.status_code = 200
         mock_resp.text = '<html><script id="__NEXT_DATA__" type="application/json">{ broken json </script></html>'
@@ -263,7 +263,7 @@ class TestSpotifyParsingAndCache(unittest.TestCase):
             cache_file = Path(tmp_dir) / "tracks.cache.json"
             client = SpotifyClient(cache_path=cache_file)
 
-            # Initially cache is empty
+            # initially cache is empty
             self.assertEqual(client.load_cache(), [])
 
             tracks = [
@@ -278,7 +278,7 @@ class TestSpotifyParsingAndCache(unittest.TestCase):
             self.assertEqual(loaded[1].title, "Song B")
 
     def test_cache_invalidation_on_source_change(self):
-        """Verifies that changing source URLs invalidates disk cache and triggers re-fetch."""
+        """verifies that changing source urls invalidates disk cache and triggers re-fetch."""
         with tempfile.TemporaryDirectory() as tmp_dir:
             cache_file = Path(tmp_dir) / "tracks.cache.json"
             client = SpotifyClient(cache_path=cache_file)
@@ -289,13 +289,13 @@ class TestSpotifyParsingAndCache(unittest.TestCase):
             tracks_a = [Track(title="Song A", artist="Artist A", duration_ms=180000)]
             client.save_cache(tracks_a, source_1)
 
-            # Matching source returns cached tracks
+            # matching source returns cached tracks
             self.assertEqual(len(client.load_cache(sources=source_1)), 1)
 
-            # Different source returns empty list (invalidated)
+            # different source returns empty list (invalidated)
             self.assertEqual(client.load_cache(sources=source_2), [])
 
-            # Proves fetch_sources ignores cache when sources differ
+            # proves fetch_sources ignores cache when sources differ
             with patch.object(client, "fetch_embed_tracks") as mock_fetch:
                 tracks_b = [Track(title="Song B", artist="Artist B", duration_ms=210000)]
                 mock_fetch.return_value = tracks_b
@@ -306,42 +306,42 @@ class TestSpotifyParsingAndCache(unittest.TestCase):
                 self.assertEqual(result[0].title, "Song B")
 
     def test_cache_invalidation_on_ttl_expiry(self):
-        """Verifies that cached tracks older than TTL are rejected."""
+        """verifies that cached tracks older than ttl are rejected."""
         with tempfile.TemporaryDirectory() as tmp_dir:
             cache_file = Path(tmp_dir) / "tracks.cache.json"
-            # 12-hour TTL
+            # 12-hour ttl
             client = SpotifyClient(cache_path=cache_file, ttl_hours=12.0)
 
             sources = ["https://open.spotify.com/playlist/playlist_A"]
             tracks = [Track(title="Song A", artist="Artist A", duration_ms=180000)]
             client.save_cache(tracks, sources)
 
-            # Simulate aging cache: 13 hours old (expired)
+            # simulate aging cache: 13 hours old (expired)
             with open(cache_file, "r", encoding="utf-8") as f:
                 data = json.load(f)
             data["saved_at"] = int(time.time()) - (13 * 3600)
             with open(cache_file, "w", encoding="utf-8") as f:
                 json.dump(data, f)
 
-            # Expired cache must return empty list
+            # expired cache must return empty list
             self.assertEqual(client.load_cache(sources=sources), [])
 
-            # Fresh cache within TTL must return cached tracks
-            data["saved_at"] = int(time.time()) - (1 * 3600)  # 1 hour old
+            # fresh cache within ttl must return cached tracks
+            data["saved_at"] = int(time.time()) - (1 * 3600)  # one hour old
             with open(cache_file, "w", encoding="utf-8") as f:
                 json.dump(data, f)
 
             self.assertEqual(len(client.load_cache(sources=sources)), 1)
 
     def test_extract_primary_artist_matrix(self):
-        # Solo artists with internal commas
+        # solo artists with internal commas
         self.assertEqual(extract_primary_artist("Tyler, The Creator"), "Tyler, The Creator")
 
-        # Complex band names with multiple commas or ampersands
+        # complex band names with multiple commas or ampersands
         self.assertEqual(extract_primary_artist("Earth, Wind & Fire"), "Earth, Wind & Fire")
         self.assertEqual(extract_primary_artist("Crosby, Stills, Nash & Young"), "Crosby, Stills, Nash & Young")
 
-        # Multi-artist delimited with non-breaking spaces (,\xa0 and ,\u00a0)
+        # multi-artist delimited with non-breaking spaces (,\xa0 and ,\u00a0)
         self.assertEqual(
             extract_primary_artist("Tyler, The Creator,\xa0A$AP Rocky"),
             "Tyler, The Creator",
@@ -355,12 +355,12 @@ class TestSpotifyParsingAndCache(unittest.TestCase):
             "Clipse",
         )
 
-        # Punctuation and symbols
+        # punctuation and symbols
         self.assertEqual(extract_primary_artist("AC/DC"), "AC/DC")
         self.assertEqual(extract_primary_artist("Sunn O)))"), "Sunn O)))")
         self.assertEqual(extract_primary_artist("Panic! At The Disco"), "Panic! At The Disco")
 
-        # Empty / fallback handling
+        # empty or fallback handling
         self.assertEqual(extract_primary_artist(""), "Unknown Artist")
         self.assertEqual(extract_primary_artist("   "), "Unknown Artist")
 

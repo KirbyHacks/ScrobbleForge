@@ -9,29 +9,24 @@ from .quota_tracker import QuotaTracker
 logger = logging.getLogger("scrobbler.queue")
 
 
-# track identity vs occurrence:
-# the queue distinguishes tracks by content identifier (spotify_id or composite metadata).
-# duplicates within a playlist (multiple occurrences of the same track) are modeled as distinct positions in the sequence.
-# the reconstruction algorithm preserves multi-set occurrence multiplicity using a fifo queue pool (pool[tid].pop(0)).
+# tracks can repeat in a playlist, so we track duplicate songs at separate queue positions.
 def _track_identifier(track: Track) -> str:
-    """Generates a stable unique identifier string for a track."""
+    """returns a unique identifier string for a track."""
     if track.spotify_id:
         return f"spotify:{track.spotify_id}"
-    return f"{track.artist.strip()}::{track.title.strip()}::{track.album.strip()}::{track.track_number}::{track.duration_ms}"
+    provider_prefix = f"{track.provider_id}::" if getattr(track, "provider_id", None) else ""
+    return f"{provider_prefix}{track.artist.strip()}::{track.title.strip()}::{track.album.strip()}::{track.track_number}::{track.duration_ms}"
 
 
 def _compute_source_hash(tracks: List[Track]) -> str:
-    """Computes a deterministic hash of the source track sequence."""
+    """returns a hash of the original track order."""
     identifiers = [_track_identifier(t) for t in tracks]
     serialized = json.dumps(identifiers, separators=(",", ":"))
     return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
 
 
 class QueueManager:
-    """
-    Manages the playlist queue, shuffling, loop repetition, and index persistence across restarts.
-    Ensures that shuffled permutations are persisted deterministically across restarts.
-    """
+    """manages playlist order, shuffling, repeating, and saving progress."""
 
     def __init__(
         self,
@@ -50,7 +45,7 @@ class QueueManager:
         self._setup_queue()
 
     def _save_permutation(self):
-        """Persists the current shuffle permutation and source hash into tracker state."""
+        """saves the current shuffle order to the database."""
         if not self.tracker or not self.queue:
             return
         perm = [_track_identifier(t) for t in self.queue]
@@ -59,12 +54,12 @@ class QueueManager:
             "queue_source_hash",
             _compute_source_hash(self.original_tracks),
         )
+        self.tracker.set_state("queue_order_mode", "shuffle")
 
     def _clear_permutation(self):
-        """Clears persisted permutation if shuffle is disabled."""
+        """clears saved shuffle order when shuffle is turned off."""
         if self.tracker:
             self.tracker.set_state("queue_permutation", "")
-            self.tracker.set_state("queue_source_hash", "")
 
     def _setup_queue(self):
         if not self.original_tracks:
@@ -73,14 +68,27 @@ class QueueManager:
             return
 
         current_source_hash = _compute_source_hash(self.original_tracks)
+        current_order_mode = "shuffle" if self.shuffle else "ordered"
+
+        saved_source_hash = self.tracker.get_state("queue_source_hash") if self.tracker else None
+        saved_order_mode = self.tracker.get_state("queue_order_mode") if self.tracker else None
+        saved_perm_raw = self.tracker.get_state("queue_permutation") if self.tracker else None
+
+        # infer saved order mode for backwards compatibility with legacy state
+        if not saved_order_mode:
+            if saved_perm_raw and saved_perm_raw.strip():
+                saved_order_mode = "shuffle"
+            elif saved_source_hash and saved_source_hash.strip():
+                saved_order_mode = "ordered"
+
+        order_mode_changed = bool(saved_order_mode and saved_order_mode != current_order_mode)
+        source_changed = bool(saved_source_hash and saved_source_hash != current_source_hash)
 
         if self.shuffle:
             restored = False
-            saved_perm_raw = self.tracker.get_state("queue_permutation") if self.tracker else None
-            saved_source_hash = self.tracker.get_state("queue_source_hash") if self.tracker else None
 
-            # restore saved permutation if source hash matches
-            if saved_perm_raw and saved_source_hash == current_source_hash:
+            # restore saved shuffle order only if order semantics match and playlist has not changed
+            if not order_mode_changed and saved_perm_raw and saved_source_hash == current_source_hash:
                 try:
                     saved_perm = json.loads(saved_perm_raw)
                     if isinstance(saved_perm, list) and len(saved_perm) == len(self.original_tracks):
@@ -115,8 +123,20 @@ class QueueManager:
         else:
             self.queue = list(self.original_tracks)
             self._clear_permutation()
+            if self.tracker:
+                self.tracker.set_state("queue_source_hash", current_source_hash)
+                self.tracker.set_state("queue_order_mode", "ordered")
+                if order_mode_changed or source_changed:
+                    self.tracker.set_state("queue_index", "0")
 
-        # restore previous playback index from state db
+        # restore previous queue position only when order semantics and source match
+        if order_mode_changed or source_changed:
+            self.current_index = 0
+            if self.tracker:
+                self.tracker.set_state("queue_index", "0")
+            return
+
+        # restore previous queue position from the database
         saved_index = self.tracker.get_state("queue_index") if self.tracker else None
         if saved_index is not None:
             try:
@@ -174,12 +194,12 @@ class QueueManager:
         return track
 
     def commit_track_progress(self):
-        """Persists the current playback index to SQLite state store after confirmed scrobble."""
+        """saves current queue position after a confirmed scrobble."""
         if self.tracker:
             self.tracker.set_state("queue_index", str(self.current_index))
 
     def peek_current_track(self) -> Optional[Track]:
-        """Looks at the next track without advancing."""
+        """returns the next track without moving the queue position forward."""
         if not self.queue or self.current_index >= len(self.queue):
             return None
         return self.queue[self.current_index]

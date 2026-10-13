@@ -1,6 +1,8 @@
 # ScrobbleForge
 
-A resilient, background-oriented Last.fm scrobbler designed for continuous, unattended execution. Ingests full Spotify playlists, complete albums, and single tracks (for obsession farming) without requiring Spotify Premium or developer credentials, featuring realistic playback simulation, non-overlapping historical timeline synthesis, and configurable rolling 24-hour rate limiting.
+Current version: **v1.1.0**.
+
+A resilient, background-oriented Last.fm scrobbler designed for continuous, unattended execution. Ingests full Spotify playlists, complete albums, single tracks, as well as public YouTube and YouTube Music playlists and tracks without requiring Premium or developer credentials, featuring realistic playback simulation, non-overlapping historical timeline synthesis, and configurable rolling 24-hour rate limiting.
 
 ---
 
@@ -10,8 +12,9 @@ Most open-source Last.fm auto-scrobblers share the same limitations:
 
 | Feature / Capability | Other Scrobblers | ScrobbleForge |
 |---|---|---|
-| **Playlists, Albums & Single Tracks** | ❌ Hardcoded to single static track loops | ✅ Full playlists, complete albums, and single obsession tracks |
-| **Free Spotify Accounts** | ❌ Blocked by Spotify Web API paywall | ✅ Zero-credential public resolution (No Premium needed) |
+| **Multi-Provider Support** | ❌ Hardcoded to single service | ✅ Spotify, YouTube, and YouTube Music public sources |
+| **Playlists, Albums & Tracks** | ❌ Hardcoded to single static track loops | ✅ Full playlists, complete albums, and single obsession tracks |
+| **Free Streaming Accounts** | ❌ Blocked by Web API paywalls | ✅ Zero-credential public resolution (No Premium or API keys needed) |
 | **Playback Timeline Synthesis** | ❌ Naive real-time flooding (overlapping timestamps) | ✅ Non-overlapping historical timeline synthesis (generates a sequential, non-overlapping virtual playback timeline) |
 | **Rolling 24h Quota Guard** | ❌ None or midnight resets (causes HTTP 429) | ✅ Rolling 24-hour persistent SQLite ledger with auto-pause/resume |
 | **Two-Factor Authentication (2FA)** | ❌ Broken with deprecated password hashing | ✅ Permanent session key authorization (`auth_helper.py`) |
@@ -81,12 +84,12 @@ docker run --rm -v "${PWD}:/out" ghcr.io/kirbyhacks/scrobbleforge:latest init
 
 *(Alternatively, download `docker-compose.yml` and `.env.example` directly from GitHub).*
 
-2. Edit `.env` with your Last.fm API Key, API Secret, and Spotify URL:
+2. Edit `.env` with your Last.fm API Key, API Secret, and music source URL:
 
 ```dotenv
 LASTFM_API_KEY=your_lastfm_api_key
 LASTFM_API_SECRET=your_lastfm_api_secret
-SPOTIFY_PLAYLIST_URL=https://open.spotify.com/playlist/37i9dQZF1DXcBWIGoYBM5M
+MUSIC_SOURCES=https://open.spotify.com/playlist/37i9dQZF1DXcBWIGoYBM5M
 ```
 
 3. Start the container:
@@ -136,7 +139,11 @@ Settings can be specified in `.env` or passed directly as Docker environment var
 | `LASTFM_API_SECRET` | *(required)* | Last.fm Shared Secret |
 | `LASTFM_USERNAME` | *(optional)* | Last.fm Account Username (auto-detected on authorization) |
 | `LASTFM_SESSION_KEY` | *(auto-generated)* | Permanent session key. If omitted, ScrobbleForge logs a 1-click web approval link and auto-saves to `data/session.key` |
-| `SPOTIFY_PLAYLIST_URL` | *(required)* | Spotify playlist, album, or single track URL. Comma-separate for multiple sources |
+| `MUSIC_SOURCES` | *(required unless legacy used)* | Comma-separated playlist, album, or track URLs (repeated entries preserved for queue weighting). Generic source variable taking precedence over legacy Spotify variables. Supported providers: Spotify, YouTube, and YouTube Music |
+| `SPOTIFY_PLAYLIST_URL` | *(legacy fallback)* | Legacy Spotify playlist, album, or single track URL. Used when `MUSIC_SOURCES` is omitted |
+| `SPOTIFY_CLIENT_ID` | *(optional)* | Spotify Developer Client ID (optional; zero credentials needed for public embed resolution) |
+| `SPOTIFY_CLIENT_SECRET` | *(optional)* | Spotify Developer Client Secret |
+| `YOUTUBE_API_KEY` | *(optional)* | Google Cloud API Key for YouTube Data API v3 (optional; zero credentials needed for default public playlist resolution) |
 | `SCROBBLE_MODE` | `realistic` | Pacing mode: `realistic`, `max_limit`, or `custom_interval` |
 | `CUSTOM_INTERVAL_SECONDS` | `60` | Delay in seconds when `SCROBBLE_MODE=custom_interval` |
 | `MAX_DAILY_SCROBBLES` | `2750` | Configurable daily safety ceiling (buffer against Last.fm's ~2,800 limit) |
@@ -145,9 +152,43 @@ Settings can be specified in `.env` or passed directly as Docker environment var
 | `UPDATE_NOW_PLAYING` | `true` | Broadcasts "Now Playing" in `realistic` mode |
 | `INTER_TRACK_PAUSE_MIN` | `1.0` | Minimum pause between tracks in seconds |
 | `INTER_TRACK_PAUSE_MAX` | `4.0` | Maximum pause between tracks in seconds |
-| `SPOTIFY_REFRESH_INTERVAL_HOURS` | `12` | Hours between automatic source playlist refreshes |
+| `SOURCES_REFRESH_INTERVAL_HOURS` | `12` | Hours between automatic source refreshes. Takes precedence over `SPOTIFY_REFRESH_INTERVAL_HOURS` |
+| `SPOTIFY_REFRESH_INTERVAL_HOURS` | `12` | Legacy hours between automatic Spotify source refreshes |
 | `DATA_DIR` | `./data` | Directory where SQLite state and cache are persisted |
 | `LOG_LEVEL` | `INFO` | Console logging verbosity (`DEBUG`, `INFO`, `WARNING`, `ERROR`) |
+
+---
+
+## Supported Source Providers & Reference URLs
+
+ScrobbleForge ingests music metadata through provider-agnostic source clients that normalize upstream payloads into canonical track models:
+
+### 1. Spotify (`spotify`)
+- **Supported URL Types**:
+  - `https://open.spotify.com/playlist/<id>`
+  - `https://open.spotify.com/album/<id>`
+  - `https://open.spotify.com/track/<id>`
+  - URIs: `spotify:playlist:<id>`, `spotify:album:<id>`, `spotify:track:<id>`
+- **Authentication**: Zero credentials required for public embeds. Optional `SPOTIFY_CLIENT_ID` / `SPOTIFY_CLIENT_SECRET` for developer app access.
+
+### 2. YouTube & YouTube Music (`youtube`)
+- **Supported URL Types**:
+  - `https://www.youtube.com/playlist?list=<id>`
+  - `https://youtube.com/playlist?list=<id>`
+  - `https://music.youtube.com/playlist?list=<id>`
+  - `https://www.youtube.com/watch?v=<id>`
+  - `https://music.youtube.com/watch?v=<id>`
+  - `https://youtu.be/<id>`
+- **Authentication**: **Zero credentials required** for public playlists and tracks. Queries public YouTube Music endpoints directly using standard HTTP requests (no `yt-dlp` or browser cookies required).
+- **Optional API Key**: `YOUTUBE_API_KEY` can be configured to route requests through the official Google Cloud YouTube Data API v3 (`playlistItems.list` and `videos.list`).
+- **Metadata Normalization**: Presentation labels such as `(Official Music Video)`, `[Official Audio]`, and `[HD]` are removed. Recording versions, including remasters and extended mixes, are preserved. Topic channel identity takes precedence over hyphens inside song titles.
+- **Conservative Omission Policy**:
+  - Private, deleted, or region-restricted items are filtered out with logged omissions.
+  - Ambiguous videos where music artist cannot be determined with adequate confidence are omitted rather than fabricating metadata.
+  - Channels (`/@channel/videos`) and YouTube Shorts (`/shorts/...`) are out of initial scope.
+- **Missing Metadata**: The provider preserves unknown album, album artist, track number, and duration as unknown. The legacy playback engine uses a 180-second pacing estimate when duration is missing; this is not a recovered duration. Source ingestion preserves known album artist and track numbers rather than substituting queue positions.
+- **Cache Upgrade**: v1.1.0 uses YouTube normalization schema 3. Older YouTube caches are refetched on the next start so incorrect artist/title mappings are not retained. Forced refresh also updates the disk cache.
+- **Access Limits**: Public references are supported; access remains subject to upstream availability. The default YouTubei integration uses unofficial endpoints and may need updates when their responses change. Supplying `YOUTUBE_API_KEY` selects Data API v3 rather than an automatic fallback after a YouTubei error.
 
 ---
 
@@ -172,7 +213,7 @@ python -m src.main
 
 ## Offline and Local Fallback Sources
 
-If a Spotify URL is unavailable or local metadata is preferred, ScrobbleForge automatically looks for fallback files in the working directory or `./data`:
+When no configured source returns tracks and source ingestion has not raised an error, ScrobbleForge looks for fallback files in the working directory or `./data`. Failed configured sources abort startup; a cached Spotify source may still be used after a fetch failure. To use a local list directly, leave music source references empty:
 
 - `tracks.txt`: Line-delimited entries in `Artist - Title` format.
 - `tracks.csv`: Exportify or TuneMyMusic CSV exports with standard track headers.
@@ -182,15 +223,29 @@ If a Spotify URL is unavailable or local metadata is preferred, ScrobbleForge au
 
 ## Test Suite
 
-ScrobbleForge includes an isolated unit test suite covering duration models, rolling quota mathematics, queue management, and non-overlapping timeline pacing:
+ScrobbleForge includes isolated unit and provider contract suites covering metadata, errors, pagination, caches, queue persistence, quota mathematics, and timeline pacing. CI runs both suites before publishing a Docker image:
 
 ```bash
-# Run isolated unit tests:
+# Install test dependencies and run all offline release checks:
+python -m pip install -r requirements-dev.txt
+python -m pytest tests/unit tests/contracts -q
+
+# Legacy unit-only runner (does not include provider contracts):
 python -m unittest discover -s tests/unit
 
 # Or via backward-compatible test runner:
 python tests/test_suite.py
 ```
+
+Live API tests remain opt-in (`RUN_LIVE_TESTS=1`) and are outside the CI release gate.
+
+To build a source archive from the current checkout, including uncommitted source changes:
+
+```bash
+python scripts/build_release.py
+```
+
+This produces `dist/scrobbleforge-1.1.0-source.zip` and a SHA-256 checksum. The archive includes source, offline tests, the README, license, and Docker/configuration templates. Credentials and local state are excluded.
 
 ---
 
@@ -198,7 +253,7 @@ python tests/test_suite.py
 
 ScrobbleForge is designed with a decoupled source ingestion architecture to support future streaming provider wrappers and monitoring tools:
 
-- **YouTube Music Wrapper**: Native zero-auth resolution for `music.youtube.com` public playlists, albums, and video tracks with zero Google API keys or YouTube Premium required.
+- **YouTube & YouTube Music Adapter**: Delivered in Phase P2.3 with zero-auth public playlist & track ingestion, plus optional Data API v3 key support.
 - **Apple Music & Deezer Wrappers**: Direct metadata extraction from public Apple Music and Deezer web links to scrobble catalog releases.
 - **Lightweight Web UI & Status Dashboard**: Optional minimal local dashboard and Prometheus metrics endpoint displaying real-time playback state, rolling 24h scrobble quotas, and queue progression.
 - **Multi-Account Concurrent Scrobbling**: Relay playback streams concurrently across multiple Last.fm or Libre.fm accounts.

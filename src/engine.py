@@ -4,7 +4,7 @@ import sqlite3
 import sys
 import threading
 import time
-from typing import Optional
+from typing import Optional, Any
 import requests
 
 try:
@@ -30,7 +30,7 @@ LASTFM_MIN_SCROBBLE_DURATION_SEC = 30
 
 
 def is_transient_error(exc: Exception) -> bool:
-    """Identifies transient network or infrastructure errors eligible for backoff and retry."""
+    """check if an error is transient and safe to retry with backoff."""
     if isinstance(exc, (LastFMTemporaryError, LastFMRateLimitError, requests.RequestException, sqlite3.OperationalError, SpotifyIngestionError, ConnectionError, TimeoutError)):
         return True
     if pylast is not None:
@@ -47,21 +47,23 @@ def is_transient_error(exc: Exception) -> bool:
 
 
 class ScrobblerEngine:
-    """Coordinates playback timing, pacing modes, and quota limits."""
+    """coordinate playback timing, pacing modes, and quota limits."""
 
     def __init__(
         self,
         config: AppConfig,
         lastfm: LastFMClient,
-        spotify: Optional[SpotifyClient],
-        queue: QueueManager,
-        tracker: QuotaTracker,
-        stop_event: threading.Event,
+        spotify: Optional[Any] = None,
+        queue: Optional[QueueManager] = None,
+        tracker: Optional[QuotaTracker] = None,
+        stop_event: Optional[threading.Event] = None,
         circuit_breaker_threshold: int = 5,
+        source_service: Optional[Any] = None,
     ):
         self.cfg = config
         self.lastfm = lastfm
-        self.spotify = spotify
+        self.source_service = source_service if source_service is not None else spotify
+        self.spotify = self.source_service
         self.queue = queue
         self.tracker = tracker
         self.stop_event = stop_event
@@ -132,7 +134,7 @@ class ScrobblerEngine:
                     self.pending_track = None
                     self.consecutive_errors = 0
                 else:
-                    # Aborted before submission: do not commit progress, keep pending_track
+                    # aborted before submission: do not commit progress and keep pending_track
                     if self.stop_event.is_set():
                         break
                     continue
@@ -171,21 +173,24 @@ class ScrobblerEngine:
         logger.info("[STOP] scrobbler engine halted cleanly")
 
     def _check_and_enforce_daily_quota(self):
-        allowed, wait_seconds = self.tracker.can_scrobble(
-            max_daily_limit=self.cfg.engine.max_daily_scrobbles
-        )
-        if not allowed:
+        while not self.stop_event.is_set():
+            allowed, wait_seconds = self.tracker.can_scrobble(
+                max_daily_limit=self.cfg.engine.max_daily_scrobbles
+            )
+            if allowed:
+                return
             mins, secs = divmod(wait_seconds, 60)
             time_str = f"{mins}m {secs:02d}s" if mins > 0 else f"{secs}s"
             logger.info(
                 f"[THROTTLED] quota guard engaged -> sleeping {time_str} until oldest scrobble ages out"
             )
-            self.stop_event.wait(timeout=wait_seconds)
+            if self.stop_event.wait(timeout=wait_seconds):
+                return
 
     def _execute_realistic_step(self, track: Track) -> bool:
         track_start_time = int(time.time())
         duration_sec = track.duration_sec
-        # last.fm requires minimum 30s duration
+        # last.fm requires a minimum 30s track duration
         scrobble_duration = max(LASTFM_MIN_SCROBBLE_DURATION_SEC, duration_sec)
 
         if self.cfg.engine.update_now_playing:
@@ -228,12 +233,12 @@ class ScrobblerEngine:
     def _execute_max_limit_step(self, track: Track) -> bool:
         now = int(time.time())
 
-        # strictly monotonic virtual timeline advancement
+        # advance virtual timeline monotonically to avoid timestamp collisions
         if self.virtual_timeline_cursor is None:
             self.virtual_timeline_cursor = now - (3 * 86400)
 
         duration_sec = track.duration_sec
-        # last.fm requires minimum 30s duration
+        # last.fm requires a minimum 30s track duration
         scrobble_duration = max(LASTFM_MIN_SCROBBLE_DURATION_SEC, duration_sec)
 
         wait_needed = 0
@@ -288,16 +293,27 @@ class ScrobblerEngine:
         return True
 
     def _check_periodic_refresh(self):
-        if not self.spotify or not self.cfg.spotify.sources:
+        # wait for the pending track before changing the queue.
+        if self.pending_track is not None:
+            return
+        sources_cfg = getattr(self.cfg, "sources", None)
+        source_list = sources_cfg.sources if (sources_cfg and sources_cfg.sources) else self.cfg.spotify.sources
+        active_service = self.source_service or self.spotify
+        if not active_service or not source_list:
             return
 
-        interval_sec = self.cfg.spotify.refresh_interval_hours * 3600
+        refresh_hours = (
+            sources_cfg.refresh_interval_hours
+            if sources_cfg
+            else self.cfg.spotify.refresh_interval_hours
+        )
+        interval_sec = refresh_hours * 3600
         now = time.time()
         if (now - self.last_refresh_time) >= interval_sec:
-            logger.info("[REFRESH] refreshing spotify sources...")
+            logger.info("[REFRESH] refreshing configured music sources...")
             try:
-                fresh_tracks = self.spotify.fetch_sources(
-                    self.cfg.spotify.sources,
+                fresh_tracks = active_service.fetch_sources(
+                    source_list,
                     use_cache_if_available=False
                 )
                 if fresh_tracks:

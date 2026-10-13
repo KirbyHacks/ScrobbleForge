@@ -1,9 +1,5 @@
 #!/usr/bin/env python3
-"""
-Last.fm Session Key Generator
-Helper CLI to obtain a permanent LASTFM_SESSION_KEY using Last.fm's official web authentication flow.
-No account password required. Supports 2FA accounts.
-"""
+"""get a last.fm session key through browser approval."""
 
 import os
 import sys
@@ -19,7 +15,7 @@ def main():
     print("=" * 60)
     print()
 
-    # Load existing .env if present
+    # load existing .env if present
     env_file = Path(".env")
     if env_file.exists():
         load_dotenv(dotenv_path=env_file)
@@ -73,7 +69,7 @@ def main():
         print(f" Session Key      : {session_key}")
         print("=" * 60)
 
-        # Offer to save to .env
+        # offer to save to .env
         save = input("\nWould you like to save this to your .env file? [Y/n]: ").strip().lower()
         if save in ("", "y", "yes"):
             if not env_file.exists():
@@ -87,7 +83,7 @@ def main():
             set_key(str(env_file), "LASTFM_API_SECRET", api_secret)
             set_key(str(env_file), "LASTFM_USERNAME", username)
             set_key(str(env_file), "LASTFM_SESSION_KEY", session_key)
-            # Clear plaintext password if any
+            # clear plaintext password if any
             set_key(str(env_file), "LASTFM_PASSWORD", "")
             print(f"\nSaved credentials to {env_file.resolve()}!")
 

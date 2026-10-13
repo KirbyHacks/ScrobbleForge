@@ -5,7 +5,7 @@ import sys
 import threading
 from pathlib import Path
 
-# Support running directly as 'python src/main.py' or 'python -m src.main'
+# support running directly as 'python src/main.py' or 'python -m src.main'
 if __package__ is None or __package__ == "":
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
     from src import __version__
@@ -16,12 +16,14 @@ if __package__ is None or __package__ == "":
         LastFMAuthError,
         LastFMAuthTimeoutError,
         LastFMAuthCancelledError,
+        LastFMTemporaryError,
         initiate_web_auth,
         poll_web_auth,
     )
     from src.queue_manager import QueueManager
     from src.quota_tracker import QuotaTracker
-    from src.spotify_client import SpotifyClient, load_local_fallback_tracks
+    from src.sources import SourceIngestionService
+    from src.spotify_client import load_local_fallback_tracks
 else:
     from . import __version__
     from .config import load_config
@@ -31,12 +33,14 @@ else:
         LastFMAuthError,
         LastFMAuthTimeoutError,
         LastFMAuthCancelledError,
+        LastFMTemporaryError,
         initiate_web_auth,
         poll_web_auth,
     )
     from .queue_manager import QueueManager
     from .quota_tracker import QuotaTracker
-    from .spotify_client import SpotifyClient, load_local_fallback_tracks
+    from .sources import SourceIngestionService
+    from .spotify_client import load_local_fallback_tracks
 
 
 DOCKER_COMPOSE_TEMPLATE = """services:
@@ -56,8 +60,65 @@ DOCKER_COMPOSE_TEMPLATE = """services:
 """
 
 
+DEFAULT_ENV_TEMPLATE = """# last.fm api credentials (https://www.last.fm/api/account/create)
+LASTFM_API_KEY=
+LASTFM_API_SECRET=
+LASTFM_USERNAME=
+LASTFM_SESSION_KEY=
+
+# optional legacy password fallback
+LASTFM_PASSWORD=
+
+# music sources: playlist, album, or track urls.
+# comma-separate for multiple sources. repeated entries are preserved for replay weighting.
+# supports public spotify, youtube, and youtube music sources.
+# paste public source urls below, separated by commas.
+MUSIC_SOURCES=
+
+# legacy spotify source fallback when generic sources are empty.
+SPOTIFY_PLAYLIST_URL=
+
+# optional spotify developer keys
+SPOTIFY_CLIENT_ID=
+SPOTIFY_CLIENT_SECRET=
+
+# optional youtube data api key
+# public sources do not need this key by default.
+YOUTUBE_API_KEY=
+
+# scrobble mode: realistic | max_limit | custom_interval
+SCROBBLE_MODE=realistic
+
+# delay in seconds for custom interval mode
+CUSTOM_INTERVAL_SECONDS=60
+
+# playback controls
+SHUFFLE=true
+LOOP=true
+
+# local scrobble limit over the last 24 hours
+MAX_DAILY_SCROBBLES=2750
+
+# show now playing in realistic mode
+UPDATE_NOW_PLAYING=true
+
+# pause between tracks in realistic mode, in seconds
+INTER_TRACK_PAUSE_MIN=1.0
+INTER_TRACK_PAUSE_MAX=4.0
+
+# hours between source updates
+SOURCES_REFRESH_INTERVAL_HOURS=12
+
+# storage for state and track cache
+DATA_DIR=./data
+
+# log level: debug, info, warning, error
+LOG_LEVEL=INFO
+"""
+
+
 def cmd_init():
-    """Generates starter docker-compose.yml and .env files."""
+    """generate starter docker-compose.yml and .env files."""
     out_dir = Path("/out") if Path("/out").is_dir() else Path(".")
     print(f"Generating ScrobbleForge starter files in: {out_dir.resolve()}")
     compose_path = out_dir / "docker-compose.yml"
@@ -78,41 +139,47 @@ def cmd_init():
         except Exception:
             pass
 
-    src_example = Path(".env.example")
     content = ""
-    if src_example.is_file():
-        content = src_example.read_text(encoding="utf-8")
-    if not content:
-        content = (
-            "# Last.fm Credentials\n"
-            "LASTFM_API_KEY=\n"
-            "LASTFM_API_SECRET=\n"
-            "LASTFM_USERNAME=\n"
-            "LASTFM_SESSION_KEY=\n\n"
-            "# Spotify Source\n"
-            "SPOTIFY_PLAYLIST_URL=\n"
-            "SCROBBLE_MODE=realistic\n"
-        )
+    for candidate_example in [
+        Path(".env.example"),
+        Path(__file__).resolve().parent.parent / ".env.example",
+    ]:
+        if candidate_example.is_file():
+            try:
+                content = candidate_example.read_text(encoding="utf-8")
+                if content.strip():
+                    break
+            except Exception:
+                pass
+
+    if not content.strip():
+        content = DEFAULT_ENV_TEMPLATE
 
     if not env_example_path.exists():
         env_example_path.write_text(content, encoding="utf-8")
         print(f"  + Created: {env_example_path.name}")
+    else:
+        print(f"  - Skipped: {env_example_path.name} (already exists)")
+
     if not env_path.exists():
         env_path.write_text(content, encoding="utf-8")
         print(f"  + Created: {env_path.name}")
         print("\nNext steps:")
-        print("1. Edit .env with your LASTFM_API_KEY, LASTFM_API_SECRET, and SPOTIFY_PLAYLIST_URL.")
+        print("1. Edit .env with your LASTFM_API_KEY, LASTFM_API_SECRET, and MUSIC_SOURCES (or legacy SPOTIFY_PLAYLIST_URL).")
+        print("   Optional: Set YOUTUBE_API_KEY for official YouTube Data API access.")
         print("2. Run 'docker compose up -d' and open 'docker compose logs -f' to complete 1-click web authorization!")
+    else:
+        print(f"  - Skipped: {env_path.name} (already exists)")
 
 
 def cmd_auth():
-    """Runs interactive authorization helper."""
+    """run interactive authorization helper."""
     import auth_helper
     auth_helper.main()
 
 
 def setup_logging(log_level_str: str):
-    """Sets up unified timestamped stdout logging."""
+    """set up unified timestamped stdout logging."""
     level = getattr(logging, log_level_str.upper(), logging.INFO)
     log_format = "[%(asctime)s] [%(levelname)s] %(message)s"
     date_format = "%Y-%m-%d %H:%M:%S"
@@ -161,7 +228,7 @@ def main():
         )
         sys.exit(1)
 
-    # Web authorization handshake
+    # web authorization handshake
     if not config.lastfm.session_key and not config.lastfm.password:
         logger.info("No LASTFM_SESSION_KEY found. Initiating one-time Last.fm web authorization...")
         try:
@@ -235,24 +302,42 @@ def main():
     tracker.prune_old_records(retention_days=14)
 
     tracks = []
-    spotify_client = None
+    source_service = None
+    ingestion_error = None
 
-    if config.spotify.sources:
-        logger.info(f"Resolving {len(config.spotify.sources)} configured playlist/album source(s)...")
+    sources_cfg = getattr(config, "sources", None)
+    configured_sources = (
+        sources_cfg.sources
+        if (sources_cfg and sources_cfg.sources)
+        else config.spotify.sources
+    )
+    refresh_ttl = (
+        sources_cfg.refresh_interval_hours
+        if sources_cfg
+        else config.spotify.refresh_interval_hours
+    )
+    youtube_api_key = sources_cfg.youtube_api_key if sources_cfg else None
+    provider_options = sources_cfg.provider_options if sources_cfg else {}
+
+    if configured_sources:
+        logger.info(f"Resolving {len(configured_sources)} configured playlist/album source(s)...")
         cache_file = config.system.data_dir / "tracks_cache.json"
-        spotify_client = SpotifyClient(
+        source_service = SourceIngestionService(
             client_id=config.spotify.client_id,
             client_secret=config.spotify.client_secret,
             cache_path=cache_file,
-            ttl_hours=config.spotify.refresh_interval_hours,
+            ttl_hours=refresh_ttl,
+            youtube_api_key=youtube_api_key,
+            provider_options=provider_options,
         )
         try:
-            tracks = spotify_client.fetch_sources(config.spotify.sources, use_cache_if_available=True)
+            tracks = source_service.fetch_sources(configured_sources, use_cache_if_available=True)
         except Exception as e:
-            logger.error(f"Failed to fetch tracks from Spotify: {e}")
+            logger.error(f"Failed to fetch tracks from sources ({type(e).__name__}): {e}")
+            ingestion_error = e
 
-    # Fallback checks if Spotify yielded no tracks
-    if not tracks:
+    # load fallback tracks only when provider ingestion did not fail
+    if not tracks and ingestion_error is None:
         for fallback_candidate in [
             config.system.data_dir / "tracks.csv",
             config.system.data_dir / "tracks.json",
@@ -268,16 +353,19 @@ def main():
                     break
 
     if not tracks:
-        logger.error(
-            "No tracks available to scrobble!\n"
-            "Please provide a valid SPOTIFY_PLAYLIST_URL in .env, "
-            "or place a tracks.txt file in the directory formatted as 'Artist - Title' per line."
-        )
+        if ingestion_error is not None:
+            logger.error(f"Startup aborted: source ingestion failed ({type(ingestion_error).__name__}).")
+        else:
+            logger.error(
+                "No tracks available to scrobble!\n"
+                "Please configure MUSIC_SOURCES (or legacy SPOTIFY_PLAYLIST_URL) in .env, "
+                "or place a tracks.txt file in the directory formatted as 'Artist - Title' per line."
+            )
         sys.exit(1)
 
     logger.info(f"Successfully loaded {len(tracks)} track(s) for scrobbling.")
 
-    # Authenticate with Last.fm
+    # authenticate with last.fm
     try:
         lastfm_client = LastFMClient(
             api_key=config.lastfm.api_key,
@@ -289,8 +377,11 @@ def main():
     except LastFMAuthError as e:
         logger.error(f"Last.fm authentication error: {e}")
         sys.exit(1)
+    except LastFMTemporaryError as e:
+        logger.error(f"Last.fm session verification failed (network error, retry later): {e}")
+        sys.exit(1)
 
-    # Setup queue manager
+    # initialize queue manager
     queue = QueueManager(
         tracks=tracks,
         tracker=tracker,
@@ -298,11 +389,12 @@ def main():
         loop=config.engine.loop,
     )
 
-    # Launch engine
+    # launch scrobbler engine
     engine = ScrobblerEngine(
         config=config,
         lastfm=lastfm_client,
-        spotify=spotify_client,
+        spotify=source_service,
+        source_service=source_service,
         queue=queue,
         tracker=tracker,
         stop_event=stop_event,

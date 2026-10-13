@@ -1,1 +1,1 @@
-"""Integration tests package for real API and external service verification."""
+"""integration tests package for real api and external service verification."""

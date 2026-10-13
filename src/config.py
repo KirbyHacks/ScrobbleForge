@@ -1,3 +1,4 @@
+import math
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -6,7 +7,7 @@ from dotenv import load_dotenv
 
 
 class ConfigError(ValueError):
-    """Raised when environment configuration fails validation."""
+    """raised when environment configuration fails validation."""
     pass
 
 
@@ -76,6 +77,9 @@ def _parse_float(
             raise ConfigError(f"Invalid {name}='{val}'. Must be a non-negative float.")
         raise ConfigError(f"Invalid {name}='{val}'. Must be a valid number.")
 
+    if not math.isfinite(parsed):
+        raise ConfigError(f"Invalid {name}='{val}'. Must be a finite number.")
+
     if strictly_positive and parsed <= 0.0:
         raise ConfigError(f"Invalid {name}='{val}'. Must be a positive float.")
 
@@ -88,7 +92,7 @@ def _parse_float(
 
 
 def _clean_credential(val: Optional[str]) -> Optional[str]:
-    """Filters out empty strings and standard template placeholders."""
+    """filter out empty strings and standard template placeholders."""
     if val is None:
         return None
     s = str(val).strip()
@@ -100,6 +104,14 @@ def _clean_credential(val: Optional[str]) -> Optional[str]:
     return s
 
 
+def _parse_source_references(raw: Optional[str]) -> List[str]:
+    """parse comma-separated source references, trimming whitespace and preserving entry order and repeated references."""
+    if raw is None or not str(raw).strip():
+        return []
+    items = str(raw).split(",")
+    return [item.strip() for item in items if item.strip()]
+
+
 @dataclass
 class LastFMConfig:
     api_key: Optional[str] = None
@@ -107,6 +119,15 @@ class LastFMConfig:
     username: Optional[str] = None
     session_key: Optional[str] = None
     password: Optional[str] = None
+
+
+@dataclass
+class SourceConfig:
+    """provider-independent source configuration."""
+    sources: List[str] = field(default_factory=list)
+    refresh_interval_hours: float = 12.0
+    provider_options: dict = field(default_factory=dict)
+    youtube_api_key: Optional[str] = None
 
 
 @dataclass
@@ -139,12 +160,25 @@ class SystemConfig:
 class AppConfig:
     lastfm: LastFMConfig
     spotify: SpotifyConfig
+    sources: Optional[SourceConfig] = None
     engine: EngineConfig = field(default_factory=EngineConfig)
     system: SystemConfig = field(default_factory=SystemConfig)
 
+    def __post_init__(self):
+        # use the legacy interval only when generic settings are omitted.
+        if self.sources is None:
+            self.sources = SourceConfig(
+                sources=list(self.spotify.sources),
+                refresh_interval_hours=self.spotify.refresh_interval_hours,
+            )
+        # backward compatibility: if legacy caller provided spotify.sources
+        # and omitted generic sources, initialize sources from spotify.sources.
+        if not self.sources.sources and self.spotify.sources:
+            self.sources.sources = list(self.spotify.sources)
+
     @classmethod
     def from_env(cls, env_path: Optional[str] = None) -> "AppConfig":
-        """Loads and validates configuration from environment variables and optional .env file."""
+        """load and validate configuration from environment variables and optional .env file."""
         if env_path:
             load_dotenv(dotenv_path=env_path)
         else:
@@ -155,14 +189,14 @@ class AppConfig:
             else:
                 load_dotenv()
 
-        # system settings
+
         data_dir = Path(os.getenv("DATA_DIR", "./data")).resolve()
         system_cfg = SystemConfig(
             data_dir=data_dir,
             log_level=os.getenv("LOG_LEVEL", "INFO").strip().upper(),
         )
 
-        # last.fm credentials
+
         session_key = _clean_credential(os.getenv("LASTFM_SESSION_KEY"))
         if not session_key:
             session_file = data_dir / "session.key"
@@ -181,23 +215,74 @@ class AppConfig:
             password=_clean_credential(os.getenv("LASTFM_PASSWORD")),
         )
 
-        # spotify configuration
-        raw_sources = os.getenv("SPOTIFY_TRACK_URL") or os.getenv("SPOTIFY_PLAYLIST_URL") or os.getenv("SPOTIFY_URL", "")
-        sources = [s.strip() for s in raw_sources.split(",") if s.strip()]
-        refresh_hours = _parse_float(
+        # refresh interval precedence:
+        # sources_refresh_interval_hours -> spotify_refresh_interval_hours -> default 12.0
+        spotify_refresh_raw = os.getenv("SPOTIFY_REFRESH_INTERVAL_HOURS")
+        sources_refresh_raw = os.getenv("SOURCES_REFRESH_INTERVAL_HOURS")
+
+        spotify_refresh_hours = _parse_float(
             "SPOTIFY_REFRESH_INTERVAL_HOURS",
-            os.getenv("SPOTIFY_REFRESH_INTERVAL_HOURS"),
+            spotify_refresh_raw,
             default=12.0,
             strictly_positive=True,
         )
+
+        if sources_refresh_raw is not None and str(sources_refresh_raw).strip():
+            sources_refresh_hours = _parse_float(
+                "SOURCES_REFRESH_INTERVAL_HOURS",
+                sources_refresh_raw,
+                default=spotify_refresh_hours,
+                strictly_positive=True,
+            )
+        else:
+            sources_refresh_hours = spotify_refresh_hours
+
+        # if legacy spotify refresh was omitted but generic was set, sync to spotify config
+        if (spotify_refresh_raw is None or not str(spotify_refresh_raw).strip()) and (
+            sources_refresh_raw is not None and str(sources_refresh_raw).strip()
+        ):
+            spotify_effective_refresh = sources_refresh_hours
+        else:
+            spotify_effective_refresh = spotify_refresh_hours
+
+        # source references precedence:
+        # 1. music_sources (generic provider-independent source list)
+        # 2. legacy spotify variables: spotify_track_url -> spotify_playlist_url -> spotify_url
+        raw_generic = os.getenv("MUSIC_SOURCES")
+        if raw_generic is not None and str(raw_generic).strip():
+            sources = _parse_source_references(raw_generic)
+            # generic source list is provider-independent; do not contaminate spotify.sources
+            spotify_sources = []
+        else:
+            raw_legacy = (
+                os.getenv("SPOTIFY_TRACK_URL")
+                or os.getenv("SPOTIFY_PLAYLIST_URL")
+                or os.getenv("SPOTIFY_URL", "")
+            )
+            sources = _parse_source_references(raw_legacy)
+            # in legacy mode, sources are specifically spotify sources
+            spotify_sources = list(sources)
+
         spotify_cfg = SpotifyConfig(
-            sources=sources,
+            sources=spotify_sources,
             client_id=_clean_credential(os.getenv("SPOTIFY_CLIENT_ID")),
             client_secret=_clean_credential(os.getenv("SPOTIFY_CLIENT_SECRET")),
-            refresh_interval_hours=refresh_hours,
+            refresh_interval_hours=spotify_effective_refresh,
         )
 
-        # engine settings validation
+        youtube_api_key = _clean_credential(os.getenv("YOUTUBE_API_KEY"))
+        provider_options = {}
+        if youtube_api_key:
+            provider_options["youtube"] = {"api_key": youtube_api_key}
+
+        sources_cfg = SourceConfig(
+            sources=list(sources),
+            refresh_interval_hours=sources_refresh_hours,
+            provider_options=provider_options,
+            youtube_api_key=youtube_api_key,
+        )
+
+
         raw_mode = os.getenv("SCROBBLE_MODE")
         if raw_mode is None or not raw_mode.strip():
             mode = "realistic"
@@ -256,11 +341,12 @@ class AppConfig:
         return cls(
             lastfm=lastfm_cfg,
             spotify=spotify_cfg,
+            sources=sources_cfg,
             engine=engine_cfg,
             system=system_cfg,
         )
 
 
 def load_config(env_path: Optional[str] = None) -> AppConfig:
-    """Loads configuration from environment variables and .env file."""
+    """load configuration from environment variables and .env file."""
     return AppConfig.from_env(env_path=env_path)

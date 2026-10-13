@@ -11,7 +11,7 @@ from src.models import Track
 
 class TestTrackModel(unittest.TestCase):
     def test_authentic_duration_preservation(self):
-        # Domain model preserves authentic track duration without platform clamping
+        # domain model preserves authentic track duration without platform clamping
         short_track = Track(title="Short", artist="Artist", duration_ms=15000)
         self.assertEqual(short_track.duration_sec, 15)
         self.assertEqual(short_track.formatted_duration, "0m 15s")

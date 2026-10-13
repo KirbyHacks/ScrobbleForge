@@ -8,19 +8,20 @@ class Track:
     artist: str
     album: str = ""
     album_artist: str = ""
-    duration_ms: int = 180000  # Default 3 mins if unknown
-    track_number: int = 1
+    duration_ms: int = 180000  # default to 3 minutes if duration is not known
+    track_number: Optional[int] = 1
     spotify_id: Optional[str] = None
     source_name: str = ""
+    provider_id: Optional[str] = None
 
     @property
     def duration_sec(self) -> int:
-        """Returns authentic track duration in seconds."""
+        """returns track duration in seconds."""
         return int(self.duration_ms / 1000)
 
     @property
     def formatted_duration(self) -> str:
-        """Returns human-readable duration, e.g. '3m 42s'."""
+        """returns formatted duration like 3m 42s."""
         sec = self.duration_sec
         minutes = sec // 60
         seconds = sec % 60
@@ -28,7 +29,7 @@ class Track:
 
     @property
     def display_name(self) -> str:
-        """Returns formatted 'Artist - Title' string."""
+        """returns artist and title formatted for display."""
         return f"{self.artist} - {self.title}"
 
     def to_dict(self) -> dict:
@@ -41,6 +42,7 @@ class Track:
             "track_number": self.track_number,
             "spotify_id": self.spotify_id,
             "source_name": self.source_name,
+            "provider_id": self.provider_id,
         }
 
     @classmethod
@@ -54,4 +56,5 @@ class Track:
             track_number=data.get("track_number", 1),
             spotify_id=data.get("spotify_id"),
             source_name=data.get("source_name", ""),
+            provider_id=data.get("provider_id"),
         )

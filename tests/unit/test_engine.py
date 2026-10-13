@@ -51,6 +51,104 @@ class TestScrobblerEngine(unittest.TestCase):
     def tearDown(self):
         self.temp_dir.cleanup()
 
+    def test_due_refresh_waits_for_pending_retry_without_duplicate_delivery(self):
+        for shuffle in (False, True):
+            with self.subTest(shuffle=shuffle), patch("src.queue_manager.random.shuffle"):
+                tracker = QuotaTracker(Path(self.temp_dir.name) / f"retry_{shuffle}.db")
+                tracks = [Track(title=t, artist="Artist") for t in ("A", "B")]
+                queue = QueueManager(tracks, tracker, shuffle=shuffle, loop=False)
+                config = AppConfig(
+                    lastfm=LastFMConfig(api_key="k", api_secret="s"),
+                    spotify=SpotifyConfig(sources=["spotify:playlist:test"]),
+                    engine=EngineConfig(mode="realistic", shuffle=shuffle, loop=False),
+                )
+                stop = threading.Event()
+                service = MagicMock()
+                service.fetch_sources.return_value = tracks
+                engine = ScrobblerEngine(
+                    config, self.mock_lfm, queue=queue, tracker=tracker,
+                    stop_event=stop, source_service=service,
+                )
+                attempts, delivered = [], []
+
+                def execute(track):
+                    attempts.append(track.title)
+                    if len(attempts) == 1:
+                        engine.last_refresh_time = 0
+                        raise LastFMTemporaryError("temporary outage")
+                    delivered.append(track.title)
+                    if len(attempts) >= 4:
+                        stop.set()
+                    return True
+
+                with patch.object(stop, "wait", return_value=False), patch.object(
+                    engine, "_execute_realistic_step", side_effect=execute
+                ):
+                    engine.run()
+                self.assertEqual(attempts, ["A", "A", "B"])
+                self.assertEqual(delivered, ["A", "B"])
+                self.assertEqual(tracker.get_state("queue_index"), "2")
+                service.fetch_sources.assert_called_once()
+
+    def test_quota_is_rechecked_after_each_wait(self):
+        config = AppConfig(lastfm=LastFMConfig(api_key="k", api_secret="s"), spotify=SpotifyConfig())
+        tracker = MagicMock()
+        tracker.get_state.return_value = None
+        tracker.can_scrobble.side_effect = [(False, 10), (False, 1), (True, 0)]
+        stop = threading.Event()
+        engine = ScrobblerEngine(config, self.mock_lfm, tracker=tracker, stop_event=stop)
+        with patch.object(stop, "wait", return_value=False) as wait:
+            engine._check_and_enforce_daily_quota()
+        self.assertEqual([call.kwargs["timeout"] for call in wait.call_args_list], [10, 1])
+        self.assertEqual(tracker.can_scrobble.call_count, 3)
+
+    def test_shutdown_interrupts_quota_wait_without_submitting(self):
+        config = AppConfig(lastfm=LastFMConfig(api_key="k", api_secret="s"), spotify=SpotifyConfig())
+        queue = QueueManager([Track(title="A", artist="Artist")], self.tracker, shuffle=False, loop=False)
+        stop = threading.Event()
+        engine = ScrobblerEngine(config, self.mock_lfm, queue=queue, tracker=self.tracker, stop_event=stop)
+
+        def shutdown(timeout=None):
+            stop.set()
+            return True
+
+        with patch.object(self.tracker, "can_scrobble", return_value=(False, 10)), patch.object(
+            stop, "wait", side_effect=shutdown
+        ):
+            engine.run()
+        self.assertEqual(self.mock_lfm.scrobbles, [])
+        self.assertEqual(queue.current_index, 0)
+
+    def test_transient_scrobble_response_error_keeps_track_uncommitted(self):
+        """a malformed or ambiguous last.fm response must not commit queue progress."""
+        cfg = AppConfig(
+            lastfm=LastFMConfig(api_key="k", api_secret="s", username="u"),
+            spotify=SpotifyConfig(),
+            engine=EngineConfig(mode="custom_interval", max_daily_scrobbles=2750, custom_interval_seconds=0),
+            system=SystemConfig(data_dir=Path(self.temp_dir.name)),
+        )
+        track = Track(title="Retry me", artist="Artist", duration_ms=180000)
+        queue = QueueManager(tracks=[track], tracker=self.tracker, shuffle=False, loop=False)
+        self.tracker.set_state("queue_index", "0")
+        lastfm = MagicMock()
+        lastfm.scrobble.side_effect = LastFMTemporaryError("malformed response")
+        stop_event = threading.Event()
+
+        def stop_on_backoff(*args, **kwargs):
+            stop_event.set()
+            return True
+
+        with patch.object(stop_event, "wait", side_effect=stop_on_backoff):
+            engine = ScrobblerEngine(
+                config=cfg, lastfm=lastfm, spotify=None, queue=queue,
+                tracker=self.tracker, stop_event=stop_event,
+            )
+            engine.run()
+
+        self.assertIs(engine.pending_track, track)
+        self.assertEqual(self.tracker.get_state("queue_index"), "0")
+        self.assertEqual(queue.current_index, 1)  # in-memory pointer advanced, but not persisted
+
     def test_max_limit_timeline_advancement(self):
         cfg = AppConfig(
             lastfm=LastFMConfig(api_key="k", api_secret="s", username="u"),
@@ -60,8 +158,8 @@ class TestScrobblerEngine(unittest.TestCase):
         )
 
         tracks = [
-            Track(title="Song 1", artist="Artist 1", duration_ms=180000),  # 180s
-            Track(title="Song 2", artist="Artist 2", duration_ms=200000),  # 200s
+            Track(title="Song 1", artist="Artist 1", duration_ms=180000),
+            Track(title="Song 2", artist="Artist 2", duration_ms=200000),
         ]
         qm = QueueManager(tracks=tracks, tracker=self.tracker, shuffle=False, loop=False)
         stop_event = threading.Event()
@@ -88,7 +186,7 @@ class TestScrobblerEngine(unittest.TestCase):
             self.assertGreater(ts2, ts1 + track1.duration_sec)
 
     def test_max_limit_timeline_never_moves_backwards_when_catching_up_to_present(self):
-        """Verifies that virtual timeline never jumps backwards when cursor catches up to or exceeds now."""
+        """virtual timeline never jumps backwards when catching up to now."""
         cfg = AppConfig(
             lastfm=LastFMConfig(api_key="k", api_secret="s", username="u"),
             spotify=SpotifyConfig(),
@@ -96,9 +194,9 @@ class TestScrobblerEngine(unittest.TestCase):
             system=SystemConfig(data_dir=Path(self.temp_dir.name)),
         )
         tracks = [
-            Track(title="Song A", artist="Artist A", duration_ms=180000),  # 180s
-            Track(title="Song B", artist="Artist B", duration_ms=200000),  # 200s
-            Track(title="Song C", artist="Artist C", duration_ms=210000),  # 210s
+            Track(title="Song A", artist="Artist A", duration_ms=180000),
+            Track(title="Song B", artist="Artist B", duration_ms=200000),
+            Track(title="Song C", artist="Artist C", duration_ms=210000),
         ]
         qm = QueueManager(tracks=tracks, tracker=self.tracker, shuffle=False, loop=False)
         stop_event = threading.Event()
@@ -113,7 +211,7 @@ class TestScrobblerEngine(unittest.TestCase):
         )
 
         now = int(time.time())
-        # Set cursor right at now - 30s
+        # set cursor right at now - 30s
         engine.virtual_timeline_cursor = now - 30
         self.mock_lfm.scrobbles.clear()
 
@@ -142,7 +240,7 @@ class TestScrobblerEngine(unittest.TestCase):
             )
 
     def test_max_limit_monotonicity_property_over_consecutive_tracks(self):
-        """Property test: 20 consecutive tracks produce strictly monotonic timestamps with no negative deltas."""
+        """twenty consecutive tracks produce strictly monotonic timestamps."""
         cfg = AppConfig(
             lastfm=LastFMConfig(api_key="k", api_secret="s", username="u"),
             spotify=SpotifyConfig(),
@@ -187,7 +285,7 @@ class TestScrobblerEngine(unittest.TestCase):
             self.assertGreaterEqual(delta, expected_min_delta)
 
     def test_max_limit_restart_preserves_forward_continuity(self):
-        """Verifies that engine restart resumes virtual timeline cursor without resetting to past."""
+        """engine restart resumes virtual timeline cursor without resetting to past."""
         cfg = AppConfig(
             lastfm=LastFMConfig(api_key="k", api_secret="s", username="u"),
             spotify=SpotifyConfig(),
@@ -213,7 +311,7 @@ class TestScrobblerEngine(unittest.TestCase):
             emitted_ts1 = self.mock_lfm.scrobbles[-1][1]
             saved_cursor = engine1.virtual_timeline_cursor
 
-            # Simulate engine restart with same persistent tracker
+            # simulate engine restart with same persistent tracker
             qm2 = QueueManager(tracks=[track2], tracker=self.tracker, shuffle=False, loop=False)
             engine2 = ScrobblerEngine(
                 config=cfg,
@@ -230,14 +328,14 @@ class TestScrobblerEngine(unittest.TestCase):
             self.assertGreater(emitted_ts2, emitted_ts1 + track1.duration_sec)
 
     def test_max_limit_timeline_advancement_enforces_30s_minimum_for_short_tracks(self):
-        """Verifies that short tracks (<30s) advance virtual timeline by at least 30s + 2s padding."""
+        """short tracks advance virtual timeline by at least 30s plus padding."""
         cfg = AppConfig(
             lastfm=LastFMConfig(api_key="k", api_secret="s", username="u"),
             spotify=SpotifyConfig(),
             engine=EngineConfig(mode="max_limit", max_daily_scrobbles=2750),
             system=SystemConfig(data_dir=Path(self.temp_dir.name)),
         )
-        short_track = Track(title="Interlude", artist="Artist", duration_ms=12000)  # 12 seconds authentic
+        short_track = Track(title="Interlude", artist="Artist", duration_ms=12000)
         qm = QueueManager(tracks=[short_track], tracker=self.tracker, shuffle=False, loop=False)
         stop_event = threading.Event()
 
@@ -252,32 +350,32 @@ class TestScrobblerEngine(unittest.TestCase):
             )
 
             initial_cursor = engine.virtual_timeline_cursor
-            # Execute max limit step directly
             engine._execute_max_limit_step(short_track)
 
-            # Scrobble duration constraint is max(30, 12) = 30s
-            # Timeline must advance by 30 + 2 = 32s, NOT 12 + 2 = 14s
+            # timeline must advance by 30s minimum plus 2s padding
             expected_cursor = initial_cursor + 30 + 2
             self.assertEqual(engine.virtual_timeline_cursor, expected_cursor)
 
     @patch("pylast._Request")
     def test_lastfm_client_scrobble_and_now_playing_enforces_30s_clamp(self, mock_request_cls):
-        """Verifies that LastFMClient passes max(30, duration_sec) to Last.fm calls."""
+        """last.fm client passes at least 30s for short tracks."""
         mock_req_inst = MagicMock()
-        mock_req_inst.execute.return_value = minidom.parseString('<ignoredMessage code="0"/>')
+        mock_req_inst.execute.return_value = minidom.parseString(
+            '<scrobbles accepted="1" ignored="0"><scrobble><ignoredMessage code="0"/></scrobble></scrobbles>'
+        )
         mock_request_cls.return_value = mock_req_inst
 
         client = LastFMClient.__new__(LastFMClient)
         client.network = MagicMock()
 
-        # Short track: 10s authentic
+        # short track under 30s
         short_track = Track(title="Intro", artist="Artist", duration_ms=10000)
         self.assertEqual(short_track.duration_sec, 10)
 
         client.scrobble(short_track, timestamp=1700000000)
         self.assertTrue(mock_request_cls.called)
         call_params = mock_request_cls.call_args[0][2]
-        self.assertEqual(call_params["duration[0]"], "30")  # Clamped to 30s platform rule!
+        self.assertEqual(call_params["duration[0]"], "30")  # clamped to last.fm 30s minimum
         self.assertEqual(call_params["artist[0]"], "Artist")
         self.assertEqual(call_params["track[0]"], "Intro")
         self.assertEqual(call_params["timestamp[0]"], "1700000000")
@@ -289,16 +387,16 @@ class TestScrobblerEngine(unittest.TestCase):
             album=None,
             album_artist=None,
             track_number=1,
-            duration=30,  # Clamped to 30s platform rule!
+            duration=30,  # clamped to last.fm 30s minimum
         )
 
-        # Normal track: 200s authentic
+        # normal track over 30s
         normal_track = Track(title="Full Song", artist="Artist", duration_ms=200000)
         self.assertEqual(normal_track.duration_sec, 200)
 
         client.scrobble(normal_track, timestamp=1700000100)
         call_params2 = mock_request_cls.call_args[0][2]
-        self.assertEqual(call_params2["duration[0]"], "200")  # Authentic 200s!
+        self.assertEqual(call_params2["duration[0]"], "200")  # authentic duration
         self.assertEqual(call_params2["artist[0]"], "Artist")
         self.assertEqual(call_params2["track[0]"], "Full Song")
         self.assertEqual(call_params2["timestamp[0]"], "1700000100")
@@ -310,12 +408,12 @@ class TestScrobblerEngine(unittest.TestCase):
             album=None,
             album_artist=None,
             track_number=1,
-            duration=200,  # Authentic 200s!
+            duration=200,  # authentic duration
         )
 
     @patch("threading.Event.wait", return_value=False)
     def test_transient_error_triggers_retry_and_resets_on_success(self, mock_wait):
-        """Verifies that transient errors increment error count and retry without skipping track."""
+        """transient errors increment error count and retry without skipping track."""
         cfg = AppConfig(
             lastfm=LastFMConfig(api_key="k", api_secret="s", username="u"),
             spotify=SpotifyConfig(),
@@ -327,7 +425,7 @@ class TestScrobblerEngine(unittest.TestCase):
         stop_event = threading.Event()
 
         mock_lfm = MagicMock()
-        # Fail once with transient error, then succeed
+        # fail once with transient error then succeed
         mock_lfm.scrobble.side_effect = [LastFMTemporaryError("Temporary 503"), True]
 
         engine = ScrobblerEngine(
@@ -347,7 +445,7 @@ class TestScrobblerEngine(unittest.TestCase):
         self.assertIsNone(engine.pending_track)
 
     def test_deterministic_bugs_halt_immediately(self):
-        """Verifies that KeyError and AttributeError are raised and stop the loop immediately."""
+        """logic errors raise immediately and stop the engine."""
         cfg = AppConfig(
             lastfm=LastFMConfig(api_key="k", api_secret="s", username="u"),
             spotify=SpotifyConfig(),
@@ -356,7 +454,6 @@ class TestScrobblerEngine(unittest.TestCase):
         )
         stop_event = threading.Event()
 
-        # Test KeyError
         track_key = Track(title="Bug Song", artist="Bug Artist", duration_ms=180000)
         qm_key = QueueManager(tracks=[track_key], tracker=None, shuffle=False, loop=False)
         mock_lfm_key = MagicMock()
@@ -372,7 +469,6 @@ class TestScrobblerEngine(unittest.TestCase):
         with self.assertRaises(KeyError):
             engine_key.run()
 
-        # Test AttributeError
         track_attr = Track(title="Bug Song 2", artist="Bug Artist 2", duration_ms=180000)
         qm_attr = QueueManager(tracks=[track_attr], tracker=None, shuffle=False, loop=False)
         mock_lfm_attr = MagicMock()
@@ -390,7 +486,7 @@ class TestScrobblerEngine(unittest.TestCase):
 
     @patch("threading.Event.wait", return_value=False)
     def test_circuit_breaker_trips_after_threshold_consecutive_failures(self, mock_wait):
-        """Verifies that the circuit breaker trips after threshold consecutive transient failures."""
+        """circuit breaker trips after threshold consecutive failures."""
         cfg = AppConfig(
             lastfm=LastFMConfig(api_key="k", api_secret="s", username="u"),
             spotify=SpotifyConfig(),
@@ -421,7 +517,7 @@ class TestScrobblerEngine(unittest.TestCase):
         self.assertEqual(mock_lfm.scrobble.call_count, 5)
 
     def test_transient_error_classification(self):
-        """Verifies is_transient_error classifies transient vs deterministic logic bugs."""
+        """transient error helper classifies network and service errors versus logic bugs."""
         self.assertTrue(is_transient_error(LastFMTemporaryError("503")))
         self.assertTrue(is_transient_error(LastFMRateLimitError("rate limited")))
         self.assertTrue(is_transient_error(requests.RequestException("connection drop")))
@@ -430,7 +526,7 @@ class TestScrobblerEngine(unittest.TestCase):
         self.assertTrue(is_transient_error(ConnectionError("socket dropped")))
         self.assertTrue(is_transient_error(TimeoutError("timed out")))
 
-        # Deterministic bugs must be False
+        # deterministic bugs are not transient
         self.assertFalse(is_transient_error(KeyError("missing_field")))
         self.assertFalse(is_transient_error(AttributeError("no attribute")))
         self.assertFalse(is_transient_error(TypeError("bad type")))
@@ -438,9 +534,7 @@ class TestScrobblerEngine(unittest.TestCase):
         self.assertFalse(is_transient_error(ValueError("bad value")))
 
     def test_max_limit_simulation_2000_steps_monotonic_and_non_future(self):
-        """Simulation test: 2,000 synthetic steps advancing simulated wall-clock time by 32s each step.
-        Asserts that effective_timestamp <= simulated_now is strictly maintained for 100% of iterations.
-        """
+        """synthetic simulation ensuring emitted timestamps never exceed wall clock."""
         mock_tracker = MagicMock(spec=QuotaTracker)
         mock_tracker.get_state.return_value = None
         mock_tracker.get_rolling_24h_count.return_value = 1
@@ -468,7 +562,7 @@ class TestScrobblerEngine(unittest.TestCase):
         )
 
         simulated_now = [1700000000]
-        # Start timeline 3 days ago as standard
+        # start timeline three days ago
         engine.virtual_timeline_cursor = simulated_now[0] - (3 * 86400)
 
         with patch("time.time", side_effect=lambda: simulated_now[0]), patch.object(stop_event, "wait", return_value=False):
@@ -488,14 +582,14 @@ class TestScrobblerEngine(unittest.TestCase):
 
     @patch("pylast._Request.execute")
     def test_lastfm_client_scrobble_detects_ignored_message(self, mock_execute):
-        """Verifies that LastFMClient returns False and logs warning when Last.fm returns ignoredMessage."""
+        """last.fm client returns false when response contains ignored message."""
         client = LastFMClient.__new__(LastFMClient)
         client.network = MagicMock()
         client.network._get_ws_auth.return_value = ("api_key", "api_secret", "session_key")
         client.network.is_caching_enabled.return_value = False
         track = Track(title="Ignored Track", artist="Artist", duration_ms=180000)
 
-        # Real Last.fm XML response with code="3" (ignored)
+        # last.fm response with ignored code
         xml_ignored = minidom.parseString(
             '<scrobbles accepted="0" ignored="1"><scrobble>'
             '<track>Ignored Track</track><artist>Artist</artist>'
@@ -506,7 +600,7 @@ class TestScrobblerEngine(unittest.TestCase):
         success = client.scrobble(track, timestamp=1700000000)
         self.assertFalse(success)
 
-        # Real Last.fm XML response with code="0" (accepted)
+        # last.fm response with accepted code
         xml_ok = minidom.parseString(
             '<scrobbles accepted="1" ignored="0"><scrobble>'
             '<track>Ignored Track</track><artist>Artist</artist>'
@@ -517,8 +611,36 @@ class TestScrobblerEngine(unittest.TestCase):
         success_ok = client.scrobble(track, timestamp=1700000000)
         self.assertTrue(success_ok)
 
+    @patch("pylast._Request.execute")
+    def test_lastfm_client_scrobble_none_doc_raises_temporary_error(self, mock_execute):
+        """last.fm client raises temporary error when xml document is none."""
+        client = LastFMClient.__new__(LastFMClient)
+        client.network = MagicMock()
+        client.network._get_ws_auth.return_value = ("api_key", "api_secret", "session_key")
+        client.network.is_caching_enabled.return_value = False
+        track = Track(title="Test Track", artist="Artist", duration_ms=180000)
+
+        mock_execute.return_value = None
+        with self.assertRaises(LastFMTemporaryError):
+            client.scrobble(track, timestamp=1700000000)
+
+    @patch("pylast._Request.execute")
+    def test_lastfm_client_scrobble_missing_scrobbles_tag_raises_temporary_error(self, mock_execute):
+        """last.fm client raises temporary error when scrobbles tag is missing."""
+        client = LastFMClient.__new__(LastFMClient)
+        client.network = MagicMock()
+        client.network._get_ws_auth.return_value = ("api_key", "api_secret", "session_key")
+        client.network.is_caching_enabled.return_value = False
+        track = Track(title="Test Track", artist="Artist", duration_ms=180000)
+
+        xml_missing = minidom.parseString('<lfm status="ok"><other/></lfm>')
+        mock_execute.return_value = xml_missing
+        with self.assertRaises(LastFMTemporaryError) as ctx:
+            client.scrobble(track, timestamp=1700000000)
+        self.assertIn("missing <scrobbles> tag", str(ctx.exception))
+
     def test_fatal_auth_error_exits_with_status_1(self):
-        """Verifies that LastFMAuthError halts the process with non-zero exit code (sys.exit(1))."""
+        """fatal authentication error halts process with exit code 1."""
         cfg = AppConfig(
             lastfm=LastFMConfig(api_key="k", api_secret="s", username="u"),
             spotify=SpotifyConfig(),
@@ -546,7 +668,7 @@ class TestScrobblerEngine(unittest.TestCase):
         self.assertEqual(ctx.exception.code, 1)
 
     def test_periodic_refresh_resilient_to_unexpected_parser_error(self):
-        """Verifies that unexpected exceptions during refresh do not crash engine and back off by 15 minutes."""
+        """unexpected refresh errors back off instead of crashing the engine."""
         cfg = AppConfig(
             lastfm=LastFMConfig(api_key="k", api_secret="s", username="u"),
             spotify=SpotifyConfig(sources=["https://open.spotify.com/playlist/test"], refresh_interval_hours=12.0),
@@ -569,18 +691,17 @@ class TestScrobblerEngine(unittest.TestCase):
         )
 
         now = time.time()
-        # Set last refresh to 13 hours ago (triggers refresh)
+        # 13 hours ago triggers refresh
         engine.last_refresh_time = now - (13 * 3600)
 
-        # Must not raise ValueError
         engine._check_periodic_refresh()
 
-        # Last refresh time must be backed off by 15m (now - interval + 900)
+        # back off next refresh by 15 minutes
         expected_backoff = now - (12 * 3600) + 900
         self.assertAlmostEqual(engine.last_refresh_time, expected_backoff, delta=5.0)
 
     def test_shutdown_before_scrobble_does_not_commit_progress(self):
-        """Verifies that aborting during wait before scrobble results in 0 scrobbles and unchanged queue index."""
+        """stopping before scrobble threshold preserves queue index."""
         cfg = AppConfig(
             lastfm=LastFMConfig(api_key="k", api_secret="s", username="u"),
             spotify=SpotifyConfig(),
@@ -596,7 +717,7 @@ class TestScrobblerEngine(unittest.TestCase):
 
         stop_event = threading.Event()
 
-        # Simulate stop_event being set during the first wait (scrobble_threshold wait)
+        # simulate stop event during scrobble threshold wait
         def mock_wait(timeout=None):
             stop_event.set()
             return True
@@ -612,16 +733,14 @@ class TestScrobblerEngine(unittest.TestCase):
             )
             engine.run()
 
-        # 0 scrobbles submitted
         self.assertEqual(len(self.mock_lfm.scrobbles), 0)
-        # queue_index in SQLite unchanged
+        # queue index in sqlite unchanged
         self.assertEqual(self.tracker.get_state("queue_index"), initial_state_index)
-        # pending_track is retained
         self.assertIsNotNone(engine.pending_track)
         self.assertEqual(engine.pending_track.title, "Track 1")
 
     def test_shutdown_after_scrobble_commits_progress(self):
-        """Verifies that aborting during remaining duration wait after scrobble commits queue progress."""
+        """stopping after scrobble commits queue progress."""
         cfg = AppConfig(
             lastfm=LastFMConfig(api_key="k", api_secret="s", username="u"),
             spotify=SpotifyConfig(),
@@ -637,8 +756,7 @@ class TestScrobblerEngine(unittest.TestCase):
         stop_event = threading.Event()
         wait_calls = []
 
-        # First wait (scrobble_threshold) completes normally (timeout elapsed -> returns False)
-        # Second wait (remaining_duration) triggers stop_event (returns True)
+        # complete first wait and stop during playback wait
         def mock_wait(timeout=None):
             wait_calls.append(timeout)
             if len(wait_calls) == 1:
@@ -657,15 +775,13 @@ class TestScrobblerEngine(unittest.TestCase):
             )
             engine.run()
 
-        # 1 scrobble submitted
         self.assertEqual(len(self.mock_lfm.scrobbles), 1)
-        # queue_index in SQLite committed to "1"
+        # queue index committed to sqlite
         self.assertEqual(self.tracker.get_state("queue_index"), "1")
-        # pending_track is cleared
         self.assertIsNone(engine.pending_track)
 
     def test_future_persisted_cursor_is_clamped_on_startup(self):
-        """A cursor left in the future by an older version must not stall or emit future timestamps."""
+        """future cursor on startup is clamped to current time."""
         now = int(time.time())
         self.tracker.set_state("virtual_timeline_cursor", str(now + int(2.7 * 86400)))
         cfg = AppConfig(

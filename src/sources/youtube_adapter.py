@@ -227,6 +227,15 @@ class YouTubeMetadataNormalizer:
                     # otherwise, title delimiters are part of the song title/version suffix
                     return cleaned, [topic_artist], "topic_channel"
 
+        if channel_title:
+            channel_artist = cls.normalize_artist(channel_title)
+            for delim in delimiters:
+                prefix = channel_artist + delim
+                if cls.is_valid_artist(channel_artist) and cleaned.casefold().startswith(prefix.casefold()):
+                    title = cleaned[len(prefix):].strip()
+                    if title:
+                        return title, [channel_artist], "reliable_parsed"
+
         # if not a topic channel, check for standard artist - title delimiters
         for delim in delimiters:
             if delim in cleaned:
@@ -344,6 +353,18 @@ class YouTubeAdapter(SourceClient):
         safe_exc_str = str(exc)
         if self.api_key and self.api_key in safe_exc_str:
             safe_exc_str = safe_exc_str.replace(self.api_key, "[REDACTED]")
+        response = getattr(exc, "response", None)
+        if status_code == 403 and response is not None:
+            try:
+                reasons = {item.get("reason") for item in response.json().get("error", {}).get("errors", [])}
+            except (ValueError, TypeError, AttributeError):
+                reasons = set()
+            if reasons.intersection({"quotaExceeded", "dailyLimitExceeded", "rateLimitExceeded", "userRateLimitExceeded"}):
+                raise SourceTemporaryError(
+                    f"{context_msg}: youtube quota exceeded (403)",
+                    status_code=403,
+                    retry_after=retry_after or 3600,
+                ) from exc
         if status_code in (401, 403):
             raise SourceAuthError(
                 f"{context_msg}: authentication/authorization failed ({status_code})",
@@ -372,7 +393,7 @@ class YouTubeAdapter(SourceClient):
         raise SourceError(f"{context_msg}: {safe_exc_str}") from exc
 
     # reload cached tracks with the new album and title rules.
-    cache_schema_version: int = 4
+    cache_schema_version: int = 5
 
     @staticmethod
     def _linked_album(runs: List[Dict[str, Any]]) -> Optional[str]:
@@ -847,11 +868,15 @@ class YouTubeAdapter(SourceClient):
                     f"YouTube playlist pagination failed on page {page_count} for '{source_url}'",
                 )
 
-            cont_shelf = (
-                c_data.get("continuationContents", {})
-                .get("musicPlaylistShelfContinuation", {})
-            )
-            c_items = cont_shelf.get("contents", [])
+            continuation_contents = c_data.get("continuationContents") if isinstance(c_data, dict) else None
+            cont_shelf = None
+            if isinstance(continuation_contents, dict):
+                cont_shelf = continuation_contents.get("musicPlaylistShelfContinuation")
+                if cont_shelf is None:
+                    cont_shelf = continuation_contents.get("musicShelfContinuation")
+            if not isinstance(cont_shelf, dict) or not isinstance(cont_shelf.get("contents"), list):
+                raise SourceTemporaryError("YouTube playlist continuation is missing its track list")
+            c_items = cont_shelf["contents"]
             total_raw_items += len(c_items)
 
             for item_wrapper in c_items:

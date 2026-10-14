@@ -159,7 +159,7 @@ class SystemConfig:
 @dataclass
 class AppConfig:
     lastfm: LastFMConfig
-    spotify: SpotifyConfig
+    spotify: SpotifyConfig = field(default_factory=SpotifyConfig)
     sources: Optional[SourceConfig] = None
     engine: EngineConfig = field(default_factory=EngineConfig)
     system: SystemConfig = field(default_factory=SystemConfig)

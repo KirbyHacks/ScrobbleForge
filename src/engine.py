@@ -16,13 +16,15 @@ from .config import AppConfig
 from .lastfm_client import (
     LastFMAuthError,
     LastFMRateLimitError,
+    LastFMDailyLimitError,
     LastFMTemporaryError,
     LastFMClient,
 )
 from .models import Track
 from .queue_manager import QueueManager
 from .quota_tracker import QuotaTracker
-from .spotify_client import SpotifyClient, SpotifyIngestionError
+from .core.source_errors import SourceTemporaryError
+from .core.sources import TrackSource
 
 logger = logging.getLogger("scrobbler.engine")
 
@@ -31,7 +33,7 @@ LASTFM_MIN_SCROBBLE_DURATION_SEC = 30
 
 def is_transient_error(exc: Exception) -> bool:
     """check if an error is transient and safe to retry with backoff."""
-    if isinstance(exc, (LastFMTemporaryError, LastFMRateLimitError, requests.RequestException, sqlite3.OperationalError, SpotifyIngestionError, ConnectionError, TimeoutError)):
+    if isinstance(exc, (LastFMTemporaryError, LastFMRateLimitError, requests.RequestException, sqlite3.OperationalError, SourceTemporaryError, ConnectionError, TimeoutError)):
         return True
     if pylast is not None:
         if isinstance(exc, (pylast.NetworkError, pylast.MalformedResponseError)):
@@ -58,7 +60,7 @@ class ScrobblerEngine:
         tracker: Optional[QuotaTracker] = None,
         stop_event: Optional[threading.Event] = None,
         circuit_breaker_threshold: int = 5,
-        source_service: Optional[Any] = None,
+        source_service: Optional[TrackSource] = None,
     ):
         self.cfg = config
         self.lastfm = lastfm
@@ -69,11 +71,16 @@ class ScrobblerEngine:
         self.stop_event = stop_event
 
         self.last_refresh_time = time.time()
+        self._refresh_retry_at = 0.0
         self.consecutive_errors = 0
         self.circuit_breaker_threshold = max(1, circuit_breaker_threshold)
         self.circuit_broken = False
         self.pending_track: Optional[Track] = None
         self._realistic_submission: Optional[Tuple[Track, int, float]] = None
+        self._submission_timestamp = None
+        self._submission_result = None
+        self._submission_recorded = False
+        self._pending_resolved = False
 
         self.virtual_timeline_cursor: Optional[int] = None
         self._init_virtual_timeline()
@@ -106,8 +113,12 @@ class ScrobblerEngine:
 
         while not self.stop_event.is_set():
             try:
+                if self._pending_resolved:
+                    self._commit_pending_track()
+                    continue
                 self._check_periodic_refresh()
-                self._check_and_enforce_daily_quota()
+                if self._submission_result is None:
+                    self._check_and_enforce_daily_quota()
 
                 if self.stop_event.is_set():
                     break
@@ -122,7 +133,7 @@ class ScrobblerEngine:
                     track = self.pending_track
 
                 enrich_metadata = getattr(self.source_service, "enrich_track_metadata", None)
-                if callable(enrich_metadata):
+                if callable(enrich_metadata) and self._submission_result is None:
                     enrich_metadata(track)
 
                 if mode == "realistic":
@@ -135,14 +146,18 @@ class ScrobblerEngine:
                     resolved = self._execute_realistic_step(track)
 
                 if resolved:
-                    self.queue.commit_track_progress()
-                    self.pending_track = None
-                    self.consecutive_errors = 0
+                    self._pending_resolved = True
+                    self._commit_pending_track()
                 else:
                     # aborted before submission: do not commit progress and keep pending_track
                     if self.stop_event.is_set():
                         break
                     continue
+
+            except LastFMDailyLimitError as e:
+                logger.warning("[DAILY LIMIT] %s -> keeping the pending track and waiting one hour", e)
+                if self.stop_event.wait(timeout=3600):
+                    break
 
             except LastFMAuthError as e:
                 logger.error(f"[AUTH ERROR] fatal last.fm authentication error: {e}")
@@ -154,7 +169,8 @@ class ScrobblerEngine:
                     raise
 
                 self.consecutive_errors += 1
-                if self.consecutive_errors >= self.circuit_breaker_threshold:
+                local_save_pending = self._pending_resolved or self._submission_result is not None
+                if self.consecutive_errors >= self.circuit_breaker_threshold and not local_save_pending:
                     self.circuit_broken = True
                     logger.critical(
                         f"[CIRCUIT BREAKER] {self.consecutive_errors} consecutive transient failures reached threshold ({self.circuit_breaker_threshold}) -> halting engine: {e}"
@@ -176,6 +192,35 @@ class ScrobblerEngine:
                         break
 
         logger.info("[STOP] scrobbler engine halted cleanly")
+
+    def _commit_pending_track(self):
+        """retry local progress without repeating a completed submission."""
+        self.queue.commit_track_progress()
+        self.pending_track = None
+        self._pending_resolved = False
+        self._clear_submission()
+        self.consecutive_errors = 0
+
+    def _clear_submission(self):
+        self._submission_timestamp = None
+        self._submission_result = None
+        self._submission_recorded = False
+
+    def _submit_track(self, track: Track, timestamp: int) -> Tuple[bool, int]:
+        """keep the response while local bookkeeping is retried."""
+        if self._submission_timestamp is None or self._submission_timestamp[0] is not track:
+            self._submission_timestamp = (track, timestamp)
+            self._submission_result = None
+            self._submission_recorded = False
+        timestamp = self._submission_timestamp[1]
+        if self._submission_result is None:
+            accepted = self.lastfm.scrobble(track, timestamp=timestamp)
+            self._submission_result = (accepted, int(time.time()))
+        accepted, submitted_at = self._submission_result
+        if accepted and not self._submission_recorded:
+            self.tracker.record_scrobble(track.artist, track.title, timestamp=submitted_at)
+            self._submission_recorded = True
+        return accepted, timestamp
 
     def _check_and_enforce_daily_quota(self):
         while not self.stop_event.is_set():
@@ -220,11 +265,9 @@ class ScrobblerEngine:
         if self.stop_event.is_set():
             return False
 
-        scrobbled = self.lastfm.scrobble(track, timestamp=track_start_time)
+        scrobbled, _ = self._submit_track(track, track_start_time)
         remaining_duration = max(0, remaining_duration - (time.monotonic() - threshold_time))
-        now = int(time.time())
         if scrobbled:
-            self.tracker.record_scrobble(track.artist, track.title, timestamp=now)
             rolling_count = self.tracker.get_rolling_24h_count()
             logger.info(
                 f"[SCROBBLED] {track.display_name} [ok] | 24h: {rolling_count:,}/{self.cfg.engine.max_daily_scrobbles:,}"
@@ -233,6 +276,7 @@ class ScrobblerEngine:
             logger.warning(f"[SCROBBLE IGNORED] Last.fm ignored scrobble for {track.display_name}")
 
         self._realistic_submission = None
+        self._clear_submission()
         if remaining_duration > 0:
             if self.stop_event.wait(timeout=remaining_duration):
                 return True
@@ -271,9 +315,8 @@ class ScrobblerEngine:
 
         effective_timestamp = min(self.virtual_timeline_cursor, now - scrobble_duration)
 
-        scrobbled = self.lastfm.scrobble(track, timestamp=effective_timestamp)
+        scrobbled, effective_timestamp = self._submit_track(track, effective_timestamp)
         if scrobbled:
-            self.tracker.record_scrobble(track.artist, track.title, timestamp=now)
             rolling_count = self.tracker.get_rolling_24h_count()
             logger.info(
                 f"[SCROBBLED] {track.display_name} [ok] | 24h: {rolling_count:,}/{self.cfg.engine.max_daily_scrobbles:,}"
@@ -284,6 +327,7 @@ class ScrobblerEngine:
         self.virtual_timeline_cursor = effective_timestamp + scrobble_duration + 2
         self.tracker.set_state("virtual_timeline_cursor", str(self.virtual_timeline_cursor))
 
+        self._clear_submission()
         pace_delay = 2.0 if wait_needed > 0 else random.uniform(31.5, 33.0)
         self.stop_event.wait(timeout=pace_delay)
         return True
@@ -293,9 +337,8 @@ class ScrobblerEngine:
             return False
 
         now = int(time.time())
-        scrobbled = self.lastfm.scrobble(track, timestamp=now)
+        scrobbled, _ = self._submit_track(track, now)
         if scrobbled:
-            self.tracker.record_scrobble(track.artist, track.title, timestamp=now)
             rolling_count = self.tracker.get_rolling_24h_count()
             logger.info(
                 f"[SCROBBLED] {track.display_name} [ok] | 24h: {rolling_count:,}/{self.cfg.engine.max_daily_scrobbles:,}"
@@ -303,38 +346,59 @@ class ScrobblerEngine:
         else:
             logger.warning(f"[SCROBBLE IGNORED] Last.fm ignored scrobble for {track.display_name}")
 
+        self._clear_submission()
         self.stop_event.wait(timeout=self.cfg.engine.custom_interval_seconds)
         return True
 
-    def _check_periodic_refresh(self):
-        # wait for the pending track before changing the queue.
-        if self.pending_track is not None:
-            return
-        sources_cfg = getattr(self.cfg, "sources", None)
-        source_list = sources_cfg.sources if (sources_cfg and sources_cfg.sources) else self.cfg.spotify.sources
-        active_service = self.source_service or self.spotify
-        if not active_service or not source_list:
-            return
+    def get_status(self) -> dict:
+        """read playback state without changing queue progress."""
+        get_sources = getattr(self.source_service, "get_status", None)
+        return {
+            "mode": self.cfg.engine.mode,
+            "queue_size": self.queue.total_tracks,
+            "queue_index": self.queue.current_index,
+            "pending_track": self.pending_track.to_dict() if self.pending_track is not None else None,
+            "quota_count": self.tracker.get_rolling_24h_count(),
+            "quota_limit": self.cfg.engine.max_daily_scrobbles,
+            "circuit_broken": self.circuit_broken,
+            "sources": get_sources() if callable(get_sources) else (),
+        }
 
-        refresh_hours = (
-            sources_cfg.refresh_interval_hours
-            if sources_cfg
-            else self.cfg.spotify.refresh_interval_hours
-        )
-        interval_sec = refresh_hours * 3600
+    def refresh_sources(self, force: bool = False) -> bool:
+        """refresh at a track boundary on the engine's owning thread."""
+        if self.pending_track is not None or self.source_service is None:
+            return False
+        sources = self.cfg.sources.sources
+        if not sources:
+            return False
+        tracks = self.source_service.fetch_sources(sources, use_cache_if_available=not force)
+        self.queue.update_tracks(tracks)
+        self.last_refresh_time = time.time()
+        self._refresh_retry_at = 0.0
+        return True
+
+    def _check_periodic_refresh(self):
+        if self.pending_track is not None or self.source_service is None:
+            return
+        sources = self.cfg.sources.sources
+        if not sources:
+            return
         now = time.time()
-        if (now - self.last_refresh_time) >= interval_sec:
-            logger.info("[REFRESH] refreshing configured music sources...")
-            try:
-                fresh_tracks = active_service.fetch_sources(
-                    source_list,
-                    use_cache_if_available=False
-                )
-                if fresh_tracks:
-                    self.queue.update_tracks(fresh_tracks)
-                self.last_refresh_time = now
-            except Exception as e:
-                logger.warning(
-                    f"[REFRESH] periodic playlist refresh failed: {e}. Backing off for 15 minutes."
-                )
-                self.last_refresh_time = now - interval_sec + 900
+        if now < self._refresh_retry_at:
+            return
+        interval_sec = self.cfg.sources.refresh_interval_hours * 3600
+        next_delay = getattr(self.source_service, "next_refresh_delay", None)
+        delay = next_delay(sources) if callable(next_delay) else None
+        if isinstance(delay, (int, float)):
+            due = delay <= 0
+        else:
+            due = now - self.last_refresh_time >= interval_sec
+        if not due:
+            return
+        logger.info("[REFRESH] refreshing configured music sources...")
+        try:
+            self.refresh_sources(force=not isinstance(delay, (int, float)))
+        except Exception as exc:
+            logger.warning("[REFRESH] source refresh failed: %s. Backing off for 15 minutes.", exc)
+            self._refresh_retry_at = now + 900
+            self.last_refresh_time = now - interval_sec + 900

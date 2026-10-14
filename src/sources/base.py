@@ -29,3 +29,11 @@ class SourceClient(ABC):
     def check_health(self) -> bool:
         """run a lightweight health check to verify upstream provider connectivity."""
         ...
+
+    def enrich_track_metadata(self, track) -> None:
+        """leave optional metadata unchanged when no lookup is available."""
+        return None
+
+    def load_legacy_cache(self, urls: List[str]):
+        """return an older cache and its source breakdown when supported."""
+        return None

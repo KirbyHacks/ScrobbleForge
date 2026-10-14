@@ -36,6 +36,11 @@ class LastFMTemporaryError(Exception):
     pass
 
 
+class LastFMDailyLimitError(LastFMRateLimitError):
+    """raised when the account has reached its daily scrobble limit."""
+    pass
+
+
 def initiate_web_auth(api_key: str, api_secret: str) -> Tuple[pylast.SessionKeyGenerator, str]:
     """starts a last.fm web authentication session and returns the generator and url."""
     network = pylast.LastFMNetwork(api_key=api_key.strip(), api_secret=api_secret.strip())
@@ -69,6 +74,8 @@ def poll_web_auth(
             # code 14 means the user has not clicked authorize yet
             if str(exc.status) == "14" or "not been authorized" in str(exc.details).lower():
                 pass
+            elif str(exc.status) in ("11", "16", "29"):
+                logger.warning("Temporary authorization error: %s", exc)
             else:
                 raise LastFMAuthError(
                     f"Last.fm authorization rejected with code {exc.status}: {exc.details}"
@@ -248,6 +255,8 @@ class LastFMClient:
             if (accepted, ignored) == (0, 1) and code > 0:
                 node = msg_nodes[0]
                 message = node.firstChild.nodeValue if node.firstChild else ""
+                if code == 5:
+                    raise LastFMDailyLimitError(message or "Daily scrobble limit exceeded")
                 logger.warning(f"[IGNORED SCROBBLE] code {code}: {message}")
                 return False
             raise LastFMTemporaryError("[SCROBBLE] Malformed response: inconsistent acknowledgement")

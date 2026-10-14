@@ -182,12 +182,12 @@ class TestSpotifyEmbedParser(unittest.TestCase):
         self.assertEqual(len(tracks), 2)
         self.assertEqual(tracks[0].title, "Resonance")
         self.assertEqual(tracks[0].artist, "HOME")
-        self.assertEqual(tracks[0].track_number, 1)
+        self.assertIsNone(tracks[0].track_number)
         self.assertEqual(tracks[0].source_name, "Synthwave Chill")
 
         self.assertEqual(tracks[1].title, "Sunset")
         self.assertEqual(tracks[1].artist, "The Midnight")
-        self.assertEqual(tracks[1].track_number, 2)
+        self.assertIsNone(tracks[1].track_number)
         self.assertEqual(tracks[1].source_name, "Synthwave Chill")
 
     def test_playlist_payload_with_pagination_and_nested_tracks(self):
@@ -283,11 +283,11 @@ class TestSpotifyEmbedParser(unittest.TestCase):
         with self.assertRaises(SpotifyIngestionError):
             SpotifyEmbedParser.parse("   \n\t  ")
 
-    def test_empty_entity_payload_returns_empty_list(self):
-        """verify returning empty list when entity dictionary is empty."""
+    def test_empty_entity_payload_raises_ingestion_error(self):
+        """reject missing entities instead of treating them as empty playlists."""
         html = _build_embed_html({})
-        tracks = SpotifyEmbedParser.parse(html)
-        self.assertEqual(tracks, [])
+        with self.assertRaises(SpotifyIngestionError):
+            SpotifyEmbedParser.parse(html)
 
     def test_missing_fields_defaults(self):
         """verify graceful fallback defaults for missing duration, album artist, and artist."""

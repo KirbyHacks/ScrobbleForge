@@ -97,7 +97,8 @@ class TestMainIntegration(unittest.TestCase):
 
         # verify engine dependency wiring
         self.assertIsNotNone(kwargs.get("source_service"))
-        self.assertIs(kwargs.get("spotify"), kwargs.get("source_service"))
+        self.assertNotIn("spotify", kwargs)
+        self.assertIsNotNone(kwargs.get("source_service"))
         queue = kwargs["queue"]
         self.assertEqual(queue.total_tracks, 1)
         self.assertEqual(queue.queue[0].title, "Spotify Track")
@@ -265,7 +266,7 @@ class TestMainIntegration(unittest.TestCase):
     def test_scrobbler_engine_injection_aliases(
         self, mock_yt_fetch, mock_load_config, mock_lfm_cls, mock_engine_cls
     ):
-        """engine receives both source_service and backward-compatible spotify alias."""
+        """startup uses the generic source service; old engine aliases remain valid."""
         cfg = self._make_config(
             sources=["https://music.youtube.com/playlist?list=PLtest"]
         )
@@ -281,7 +282,7 @@ class TestMainIntegration(unittest.TestCase):
         kwargs = mock_engine_cls.call_args[1]
         service = kwargs["source_service"]
         self.assertIsNotNone(service)
-        self.assertIs(kwargs["spotify"], service)
+        self.assertNotIn("spotify", kwargs)
 
         # test backward-compatible alias inside scrobblerengine itself
         engine = ScrobblerEngine(

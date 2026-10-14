@@ -12,10 +12,7 @@ logger = logging.getLogger("scrobbler.queue")
 # tracks can repeat in a playlist, so we track duplicate songs at separate queue positions.
 def _track_identifier(track: Track) -> str:
     """returns a unique identifier string for a track."""
-    if track.spotify_id:
-        return f"spotify:{track.spotify_id}"
-    provider_prefix = f"{track.provider_id}::" if getattr(track, "provider_id", None) else ""
-    return f"{provider_prefix}{track.artist.strip()}::{track.title.strip()}::{track.album.strip()}::{track.track_number}::{track.duration_ms}"
+    return track.queue_identity
 
 
 def _compute_source_hash(tracks: List[Track]) -> str:
@@ -165,12 +162,13 @@ class QueueManager:
             self.current_index = 0
 
     def update_tracks(self, new_tracks: List[Track]):
-        if not new_tracks:
-            return
-
         logger.info(f"[QUEUE] updated track queue with {len(new_tracks)} fresh tracks")
         self.original_tracks = list(new_tracks)
         self._setup_queue()
+        if not new_tracks and self.tracker:
+            self.tracker.set_state("queue_index", "0")
+            self.tracker.set_state("queue_source_hash", _compute_source_hash([]))
+            self._clear_permutation()
 
     def get_next_track(self) -> Optional[Track]:
         if not self.queue:

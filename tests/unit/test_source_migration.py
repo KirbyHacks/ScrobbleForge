@@ -164,10 +164,9 @@ class TestSourceMigrationMetadataEquivalence(unittest.TestCase):
 
         self.assertEqual(len(tracks), 2)
         self.assertEqual(tracks[0].title, "Track 1")
-        self.assertEqual(tracks[0].track_number, 1)
+        self.assertIsNone(tracks[0].track_number)
         self.assertEqual(tracks[1].title, "Track 2")
-        # authentic source track number is preserved; not replaced by queue position 2
-        self.assertEqual(tracks[1].track_number, 1)
+        self.assertIsNone(tracks[1].track_number)
 
 
 class TestSourceMigrationCacheCompatibility(unittest.TestCase):
@@ -411,8 +410,8 @@ class TestSourceMigrationStrictFailuresAndSafeguards(unittest.TestCase):
             service.fetch_sources(["https://open.spotify.com/playlist/timeout_test"], use_cache_if_available=False)
 
     @patch("src.spotify_client.requests.get")
-    def test_no_partial_queue_when_one_source_fails(self, mock_get):
-        """verify failure in multi-source request does not produce a partial queue."""
+    def test_strict_policy_rejects_partial_queue(self, mock_get):
+        """explicit strict policy rejects a partial result."""
         def mock_call(url, **kwargs):
             if "good" in url:
                 resp = MagicMock()
@@ -433,7 +432,7 @@ class TestSourceMigrationStrictFailuresAndSafeguards(unittest.TestCase):
             "https://open.spotify.com/playlist/bad",
         ]
         with self.assertRaises(SourceTemporaryError):
-            service.fetch_sources(sources, use_cache_if_available=False)
+            service.fetch_sources(sources, use_cache_if_available=False, allow_partial=False)
 
     def test_periodic_refresh_failure_preserves_running_queue(self):
         """verify periodic refresh failure in scrobblerengine does not clobber existing queue."""

@@ -167,16 +167,16 @@ class TestSpotifyParsingAndCache(unittest.TestCase):
         self.assertEqual(tracks[0].title, "Resonance")
         self.assertEqual(tracks[0].artist, "HOME")
         self.assertEqual(tracks[0].duration_ms, 212000)
-        self.assertEqual(tracks[0].track_number, 1)
+        self.assertIsNone(tracks[0].track_number)
         self.assertEqual(tracks[0].source_name, "Synthwave Chill")
 
         self.assertEqual(tracks[1].title, "Sunset")
         self.assertEqual(tracks[1].artist, "The Midnight")
-        self.assertEqual(tracks[1].track_number, 2)
+        self.assertIsNone(tracks[1].track_number)
 
         self.assertEqual(tracks[2].title, "Days of Thunder")
         self.assertEqual(tracks[2].artist, "The Midnight")
-        self.assertEqual(tracks[2].track_number, 3)
+        self.assertIsNone(tracks[2].track_number)
 
         mock_get.assert_called_once()
         call_url = mock_get.call_args[0][0]

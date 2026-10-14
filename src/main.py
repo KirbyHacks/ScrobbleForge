@@ -23,7 +23,7 @@ if __package__ is None or __package__ == "":
     from src.queue_manager import QueueManager
     from src.quota_tracker import QuotaTracker
     from src.sources import SourceIngestionService
-    from src.spotify_client import load_local_fallback_tracks
+    from src.core.local_tracks import load_local_fallback_tracks
 else:
     from . import __version__
     from .config import load_config
@@ -40,7 +40,7 @@ else:
     from .queue_manager import QueueManager
     from .quota_tracker import QuotaTracker
     from .sources import SourceIngestionService
-    from .spotify_client import load_local_fallback_tracks
+    from .core.local_tracks import load_local_fallback_tracks
 
 
 DOCKER_COMPOSE_TEMPLATE = """services:
@@ -393,7 +393,6 @@ def main():
     engine = ScrobblerEngine(
         config=config,
         lastfm=lastfm_client,
-        spotify=source_service,
         source_service=source_service,
         queue=queue,
         tracker=tracker,

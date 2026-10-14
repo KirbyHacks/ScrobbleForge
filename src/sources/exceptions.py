@@ -1,43 +1,8 @@
-"""exceptions for music source clients and providers."""
+"""source errors and http metadata helpers."""
 from typing import Optional, Tuple
-
-
-class SourceError(Exception):
-    """base exception for all source client errors."""
-
-    pass
-
-
-class UnsupportedSourceError(SourceError):
-    """raised when a source url or provider is not recognized or unsupported."""
-
-    pass
-
-
-class SourceAuthError(SourceError):
-    """raised when authentication fails for a source provider."""
-
-    def __init__(
-        self,
-        message: object = "",
-        status_code: Optional[int] = None,
-    ):
-        super().__init__(message)
-        self.status_code = status_code
-
-
-class SourceTemporaryError(SourceError):
-    """raised when a transient network or provider failure occurs."""
-
-    def __init__(
-        self,
-        message: object = "",
-        status_code: Optional[int] = None,
-        retry_after: Optional[int] = None,
-    ):
-        super().__init__(message)
-        self.status_code = status_code
-        self.retry_after = retry_after
+from src.core.source_errors import (
+    SourceError, UnsupportedSourceError, SourceAuthError, SourceTemporaryError,
+)
 
 
 def extract_http_metadata(exc: Exception) -> Tuple[Optional[int], Optional[int]]:

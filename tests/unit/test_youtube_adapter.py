@@ -1025,7 +1025,7 @@ class TestYouTubeAdapterIngestion(unittest.TestCase):
 
     def test_youtube_only_ingestion_does_not_instantiate_spotify(self):
         """verifies that a youtube-only source list does not instantiate spotifyclient."""
-        with patch("src.sources.service.SpotifyClient") as mock_spotify_cls:
+        with patch("src.sources.spotify_adapter.SpotifyClient") as mock_spotify_cls:
             service = SourceIngestionService()
 
             # mock youtubeadapter.fetch_sources

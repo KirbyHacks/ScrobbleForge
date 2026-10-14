@@ -1,8 +1,9 @@
 """spotify adapter implementing the sourceclient interface."""
 import logging
+import copy
+import json
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
-from urllib.parse import urlparse
 
 import requests
 
@@ -11,6 +12,7 @@ from src.models import Track
 from src.spotify_client import (
     SpotifyClient,
     SpotifyIngestionError,
+    parse_spotify_reference,
     _USER_AGENT,
 )
 from .base import SourceClient
@@ -29,6 +31,7 @@ class SpotifyAdapter(SourceClient):
     """adapter bridging the existing spotifyclient to the canonical sourceclient interface."""
 
     provider_id: str = "spotify"
+    cache_schema_version: int = 2
 
     def __init__(
         self,
@@ -38,6 +41,8 @@ class SpotifyAdapter(SourceClient):
         cache_path: Optional[Path] = None,
         retries: int = 1,
         ttl_hours: float = 12.0,
+        managed_cache: bool = False,
+        legacy_cache_path: Optional[Path] = None,
     ):
         if client is not None:
             self._client = client
@@ -49,51 +54,49 @@ class SpotifyAdapter(SourceClient):
                 retries=retries,
                 ttl_hours=ttl_hours,
             )
+        self._legacy_cache_path = legacy_cache_path or getattr(self._client, "cache_path", None)
+        if managed_cache:
+            self._client = copy.copy(self._client)
+            self._client.cache_path = None
+
+    def enrich_track_metadata(self, track: Track) -> None:
+        if track.spotify_id and not track.album:
+            self._client.enrich_track_metadata(track)
+
+    def load_legacy_cache(self, urls: List[str]):
+        """read the old batch without guessing which source owns a track."""
+        if not isinstance(self._legacy_cache_path, (str, Path)):
+            return None
+        reader = copy.copy(self._client)
+        reader.cache_path = Path(self._legacy_cache_path)
+        try:
+            data = json.loads(reader.cache_path.read_text(encoding="utf-8"))
+            saved_sources = [source.strip() for source in data.get("sources", [])]
+            if not saved_sources or not all(self.supports_url(url) for url in saved_sources):
+                return None
+            if len(set(url.lower() for url in saved_sources)) != len(set(saved_sources)):
+                return None
+            tracks = reader.load_cache(sources=saved_sources)
+            if not tracks:
+                return None
+            raw = data.get("source_tracks", {})
+            grouped = {}
+            for url in set(saved_sources):
+                rows = raw.get(url.lower())
+                if isinstance(rows, list):
+                    grouped[url] = [self.map_to_canonical(Track.from_dict(row), url) for row in rows]
+            if not all(url in grouped for url in saved_sources):
+                if saved_sources != urls:
+                    return None
+                grouped = {}
+            return [self.map_to_canonical(track) for track in tracks], grouped, float(data["saved_at"])
+        except (OSError, ValueError, TypeError, KeyError, AttributeError):
+            return None
 
     @classmethod
     def supports_url(cls, url: str) -> bool:
         """check whether the given url or uri is a supported spotify source."""
-        if not url or not isinstance(url, str):
-            return False
-
-        raw = url.strip()
-        if not raw:
-            return False
-
-        # spotify uri format: spotify:playlist:id, spotify:album:id, spotify:track:id
-        if raw.lower().startswith("spotify:"):
-            parts = raw.split(":")
-            if len(parts) >= 3 and parts[1].lower() in (
-                "playlist",
-                "album",
-                "track",
-                "artist",
-                "user",
-            ):
-                return True
-            return False
-
-        try:
-            parsed = urlparse(raw)
-        except Exception:
-            return False
-
-        if parsed.scheme in ("http", "https"):
-            hostname = (parsed.hostname or "").lower()
-            if hostname == "open.spotify.com":
-                path_parts = [p for p in parsed.path.split("/") if p]
-                if path_parts and path_parts[0].lower() in (
-                    "playlist",
-                    "album",
-                    "track",
-                    "embed",
-                ):
-                    return True
-                # accept if path has at least an entity type
-                if len(path_parts) >= 2:
-                    return True
-
-        return False
+        return parse_spotify_reference(url) is not None
 
     @staticmethod
     def map_to_canonical(

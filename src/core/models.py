@@ -28,6 +28,28 @@ class CanonicalTrack:
         return self.artists[0] if self.artists else "Unknown Artist"
 
 
+def valid_source_track(track: CanonicalTrack, provider: str) -> bool:
+    """check provider output before it reaches the playback queue."""
+    if not isinstance(track, CanonicalTrack) or track.provider_id != provider:
+        return False
+    if not isinstance(track.title, str) or not isinstance(track.artists, list):
+        return False
+    if not all(isinstance(artist, str) for artist in track.artists):
+        return False
+    if not isinstance(track.external_ids, dict):
+        return False
+    if not all(isinstance(key, str) and isinstance(value, str) for key, value in track.external_ids.items()):
+        return False
+    if any(value is not None and not isinstance(value, str) for value in
+           (track.album, track.album_artist, track.source_uri, track.source_name, track.isrc)):
+        return False
+    if track.duration_ms is not None and (type(track.duration_ms) is not int or track.duration_ms < 0):
+        return False
+    if track.track_number is not None and (type(track.track_number) is not int or track.track_number <= 0):
+        return False
+    return True
+
+
 def to_canonical_track(
     track: "Track",
     provider_id: str = "spotify",

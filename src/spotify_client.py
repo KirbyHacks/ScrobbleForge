@@ -1,6 +1,5 @@
 import base64
 import binascii
-import csv
 import hashlib
 import json
 import logging
@@ -8,8 +7,11 @@ import re
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
+from urllib.parse import urlparse
 import requests
 from .models import Track
+from .core.source_errors import SourceTemporaryError
+from .core.local_tracks import load_local_fallback_tracks
 
 logger = logging.getLogger("scrobbler.spotify")
 
@@ -23,6 +25,34 @@ _METADATA_USER_AGENT = (
     "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) "
     "AppleWebKit/605.1.15 Version/17.0 Mobile/15E148 Safari/604.1"
 )
+
+def parse_spotify_reference(raw: str) -> Optional[Tuple[str, str]]:
+    """resolve supported spotify urls and uris using the same rules."""
+    if not isinstance(raw, str):
+        return None
+    raw = raw.strip()
+    if raw.lower().startswith("spotify:"):
+        parts = raw.split(":")
+        if len(parts) == 3 and parts[1].lower() in ("playlist", "album", "track"):
+            identifier = parts[2].split("?")[0]
+            if re.fullmatch(r"[a-zA-Z0-9_-]+", identifier):
+                return parts[1].lower(), identifier
+        return None
+    try:
+        parsed = urlparse(raw)
+        if parsed.scheme.lower() not in ("http", "https") or parsed.hostname != "open.spotify.com":
+            return None
+        parts = [part for part in parsed.path.split("/") if part]
+        if parts and re.fullmatch(r"intl-[a-zA-Z-]+", parts[0]):
+            parts.pop(0)
+        if parts and parts[0].lower() == "embed":
+            parts.pop(0)
+        if len(parts) == 2 and parts[0].lower() in ("playlist", "album", "track") and re.fullmatch(r"[a-zA-Z0-9_-]+", parts[1]):
+            return parts[0].lower(), parts[1]
+    except ValueError:
+        pass
+    return None
+
 
 def extract_primary_artist(raw_subtitle: str) -> str:
     """extract primary artist, handling spotify comma + non-breaking space delimiters."""
@@ -39,7 +69,7 @@ def extract_primary_artist(raw_subtitle: str) -> str:
     return text.replace("\xa0", " ").strip()
 
 
-class SpotifyIngestionError(Exception):
+class SpotifyIngestionError(SourceTemporaryError):
     """raised when track resolution fails."""
     pass
 
@@ -218,7 +248,7 @@ class SpotifyEmbedParser:
         if isinstance(items, list):
             return items
 
-        return []
+        raise SpotifyIngestionError("Spotify source is missing its track list")
 
     @classmethod
     def _parse_track(cls, entity: dict, default_id: Optional[str] = None) -> List[Track]:
@@ -320,10 +350,19 @@ class SpotifyEmbedParser:
             elif isinstance(album_obj, str):
                 album_name = album_obj.strip()
 
-            album_artist = item.get("album_artist") or item.get("albumArtist") or primary_artist
+            album_artist = item.get("album_artist") or item.get("albumArtist")
+            if not album_artist and isinstance(album_obj, dict):
+                album_artist = cls.extract_artist(album_obj.get("artists"), fallback="")
+            album_artist = album_artist or primary_artist
             duration_ms = cls.normalize_duration(item.get("duration") or item.get("duration_ms"))
             spotify_id = cls.extract_spotify_id(item.get("uri"), item.get("id"))
-            track_number = int(item.get("track_number") or item.get("trackNumber") or idx)
+            raw_number = item.get("track_number") or item.get("trackNumber")
+            try:
+                track_number = int(raw_number) if raw_number is not None else None
+                if isinstance(raw_number, bool) or (track_number is not None and track_number <= 0):
+                    track_number = None
+            except (ValueError, TypeError, OverflowError):
+                track_number = None
 
             tracks.append(Track(
                 title=title,
@@ -351,7 +390,7 @@ class SpotifyEmbedParser:
         entity = cls._extract_entity(payload)
 
         if not entity:
-            return []
+            raise SpotifyIngestionError("Spotify response is missing its source entity")
 
         resolved_type = (entity_type or "").lower().strip()
         if not resolved_type:
@@ -473,16 +512,12 @@ class SpotifyClient:
         """parse a spotify url, uri, or id into (item_type, item_id)."""
         raw = uri_or_url.strip()
 
-        if raw.startswith("spotify:"):
-            parts = raw.split(":")
-            if len(parts) >= 3:
-                return parts[1].lower(), parts[2].split("?")[0]
-
-        match = re.search(r"open\.spotify\.com/(playlist|album|track)/([a-zA-Z0-9]+)", raw)
-        if match:
-            return match.group(1).lower(), match.group(2)
-
-        return "playlist", raw.split("?")[0].strip()
+        reference = parse_spotify_reference(raw)
+        if reference is not None:
+            return reference
+        if re.fullmatch(r"[a-zA-Z0-9]+", raw):
+            return "playlist", raw
+        raise SpotifyIngestionError("Unsupported Spotify source reference")
 
     def load_cache(
         self,
@@ -661,61 +696,3 @@ class SpotifyClient:
             raise
 
         return all_tracks
-
-
-def load_local_fallback_tracks(file_path: Path) -> List[Track]:
-    """load fallback tracks from txt, csv, or json files."""
-    path = Path(file_path)
-    if not path.is_file():
-        return []
-
-    tracks: List[Track] = []
-    suffix = path.suffix.lower()
-
-    if suffix == ".json":
-        try:
-            with open(path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-                if isinstance(data, list):
-                    for item in data:
-                        if isinstance(item, dict) and "artist" in item and "title" in item:
-                            tracks.append(Track.from_dict(item))
-        except Exception as e:
-            logger.warning(f"Could not parse JSON track list: {e}")
-
-    elif suffix == ".csv":
-        try:
-            with open(path, "r", encoding="utf-8") as f:
-                reader = csv.DictReader(f)
-                for row in reader:
-                    title = row.get("Track Name") or row.get("title") or row.get("Track")
-                    artist = row.get("Artist Name(s)") or row.get("artist") or row.get("Artist")
-                    album = row.get("Album Name") or row.get("album") or ""
-                    duration_ms = row.get("Duration (ms)") or row.get("duration_ms")
-
-                    if title and artist:
-                        ms = int(duration_ms) if duration_ms and str(duration_ms).isdigit() else 180000
-                        tracks.append(Track(
-                            title=title.strip(),
-                            artist=artist.strip(),
-                            album=album.strip(),
-                            duration_ms=ms,
-                            source_name="Local CSV",
-                        ))
-        except Exception as e:
-            logger.warning(f"Could not parse CSV track list: {e}")
-
-    else:
-        try:
-            with open(path, "r", encoding="utf-8") as f:
-                for line in f:
-                    line = line.strip()
-                    if not line or line.startswith("#"):
-                        continue
-                    if " - " in line:
-                        parts = line.split(" - ", 1)
-                        tracks.append(Track(artist=parts[0].strip(), title=parts[1].strip(), source_name="Local List"))
-        except Exception as e:
-            logger.warning(f"Could not parse text track list: {e}")
-
-    return tracks

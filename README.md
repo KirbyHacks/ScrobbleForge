@@ -1,6 +1,6 @@
 # ScrobbleForge
 
-Current version: **v1.1.1**.
+Current version: **v1.1.3**.
 
 A resilient, background-oriented Last.fm scrobbler designed for continuous, unattended execution. Ingests full Spotify playlists, complete albums, single tracks, as well as public YouTube and YouTube Music playlists and tracks without requiring Premium or developer credentials, featuring realistic playback simulation, non-overlapping historical timeline synthesis, and configurable rolling 24-hour rate limiting.
 
@@ -31,6 +31,8 @@ ScrobbleForge replaces subjective claims with explicit, software-controlled mech
 - **Configurable daily safety ceiling (default: 2,750/day buffer against Last.fm's ~2,800 limit)**: Enforces an intentional buffer below Last.fm's ~2,800 daily submission ceiling to prevent HTTP 429 rate-limiting.
 - **Authentic track duration modeling with Last.fm 30-second submission clamping**: Models true track runtimes from source metadata while strictly clamping minimum scrobble duration to 30 seconds per Last.fm API submission rules.
 - **Delivery Semantics**: Scrobble delivery operates under at-least-once semantics during ambiguous network timeouts. If Last.fm accepts a submission but the network response drops, the engine will retry upon reconnect, which may occasionally produce duplicate scrobbles for that track.
+
+Once Last.fm confirms a submission, a local database failure retries only the remaining bookkeeping while the process stays running. If Last.fm reports its daily account limit, the pending track stays in place and retries after an hour with the same timestamp. This also covers scrobbles submitted outside ScrobbleForge that the local quota ledger cannot see.
 
 ---
 
@@ -170,7 +172,7 @@ Settings can be specified in `.env` or passed directly as Docker environment var
 | `UPDATE_NOW_PLAYING` | `true` | Broadcasts "Now Playing" in `realistic` mode |
 | `INTER_TRACK_PAUSE_MIN` | `1.0` | Minimum pause between tracks in seconds |
 | `INTER_TRACK_PAUSE_MAX` | `4.0` | Maximum pause between tracks in seconds |
-| `SOURCES_REFRESH_INTERVAL_HOURS` | `12` | Hours between automatic source refreshes. Takes precedence over `SPOTIFY_REFRESH_INTERVAL_HOURS` |
+| `SOURCES_REFRESH_INTERVAL_HOURS` | `12` | Cache lifetime and automatic refresh interval for each source. Takes precedence over `SPOTIFY_REFRESH_INTERVAL_HOURS` |
 | `SPOTIFY_REFRESH_INTERVAL_HOURS` | `12` | Legacy hours between automatic Spotify source refreshes |
 | `DATA_DIR` | `./data` | Directory where SQLite state and cache are persisted |
 | `LOG_LEVEL` | `INFO` | Console logging verbosity (`DEBUG`, `INFO`, `WARNING`, `ERROR`) |
@@ -205,10 +207,22 @@ ScrobbleForge ingests music metadata through provider-agnostic source clients th
   - Ambiguous videos where music artist cannot be determined with adequate confidence are omitted rather than fabricating metadata.
   - Channels (`/@channel/videos`) and YouTube Shorts (`/shorts/...`) are out of initial scope.
 - **Missing Metadata**: The provider preserves unknown album, album artist, track number, and duration as unknown. The legacy playback engine uses a 180-second pacing estimate when duration is missing; this is not a recovered duration. Source ingestion preserves known album artist and track numbers rather than substituting queue positions.
-- **Cache Upgrade**: v1.1.1 uses YouTube cache version 4. Older caches are refreshed on the next start to update album names and version labels. A forced refresh also updates the disk cache.
+- **Cache Upgrade**: v1.1.3 uses YouTube cache version 5 and Spotify source cache version 2. Older source entries are refreshed to apply the corrected metadata rules. A forced refresh also updates the disk cache.
 - **Access Limits**: Public references are supported; access remains subject to upstream availability. The default YouTubei integration uses unofficial endpoints and may need updates when their responses change. Supplying `YOUTUBE_API_KEY` selects Data API v3 rather than an automatic fallback after a YouTubei error.
 
 ---
+
+## Source Cache and Refresh
+
+The source service stores separate entries in `DATA_DIR/tracks_cache.json`, keyed by provider and exact source reference. Each entry keeps its own fetch time and metadata version. Reordering sources reuses those entries; repeated references still repeat their tracks in the queue without repeating the fetch.
+
+Automatic refresh checks each source's age. A successful refresh replaces only that source's entry. A temporary failure keeps its last valid tracks without renewing their age, and retries after 15 minutes. A provider rate limit also respects a longer `Retry-After` value and does not block other providers. Fresh sources remain cached while a failed source retries.
+
+Startup can continue with healthy sources when another source fails. Failures are logged and included in the source report. Authentication failures and invalid sources do not use stale tracks. If every source fails and no usable cached tracks remain, startup still stops.
+
+Older Spotify caches with a source breakdown are migrated with their original fetch times. An older batch without that breakdown stays whole until all its sources refresh successfully; its tracks are not assigned to guessed sources. Existing YouTube caches are fetched again once into the shared format. A successful empty source replaces its previous tracks.
+
+The engine uses a generic source contract. Python callers can use `SourceIngestionService.fetch_sources_with_report(sources)`, `refresh_sources(sources, force=True)`, and `get_status()` to inspect outcomes or refresh sources. `ScrobblerEngine.get_status()` reports playback and quota state; `refresh_sources()` updates the queue only between tracks. Engine refresh calls belong on the thread running the playback loop. These methods provide the base for future management interfaces.
 
 ## Standalone Execution (Without Docker)
 
@@ -231,7 +245,7 @@ python -m src.main
 
 ## Offline and Local Fallback Sources
 
-When no configured source returns tracks and source ingestion has not raised an error, ScrobbleForge looks for fallback files in the working directory or `./data`. Failed configured sources abort startup; a cached Spotify source may still be used after a fetch failure. To use a local list directly, leave music source references empty:
+When no configured source returns tracks and source ingestion has not raised an error, ScrobbleForge looks for fallback files in the working directory or `./data`. Healthy sources and cached tracks can keep startup running after a partial failure. If all configured sources fail without usable cached tracks, startup stops instead of silently loading a local list. To use a local list directly, leave music source references empty:
 
 - `tracks.txt`: Line-delimited entries in `Artist - Title` format.
 - `tracks.csv`: Exportify or TuneMyMusic CSV exports with standard track headers.
@@ -263,17 +277,22 @@ To build a source archive from the current checkout, including uncommitted sourc
 python scripts/build_release.py
 ```
 
-This produces `dist/scrobbleforge-1.1.1-source.zip` and a SHA-256 checksum. The archive includes source, offline tests, the README, license, and Docker/configuration templates. Credentials and local state are excluded.
+This produces `dist/scrobbleforge-1.1.3-source.zip` and a SHA-256 checksum. The archive includes source, offline tests, the README, license, and Docker/configuration templates. Credentials and local state are excluded.
 
 ---
 
 ## What's Next (Roadmap)
 
-ScrobbleForge is designed with a decoupled source ingestion architecture to support future streaming provider wrappers and monitoring tools:
+v1.1.3 delivers the shared core, independent source caches, and playback/status methods. Starting with v1.2, the focus is on user interfaces and controls built on that core:
 
-- **YouTube & YouTube Music Adapter**: Delivered in Phase P2.3 with zero-auth public playlist & track ingestion, plus optional Data API v3 key support.
-- **Apple Music & Deezer Wrappers**: Direct metadata extraction from public Apple Music and Deezer web links to scrobble catalog releases.
-- **Lightweight Web UI & Status Dashboard**: Optional minimal local dashboard and Prometheus metrics endpoint displaying real-time playback state, rolling 24h scrobble quotas, and queue progression.
+- **CLI & Headless Controls**: Manage sources and inspect playback from the terminal or a headless Docker deployment.
+- **Local API**: Expose the core methods for local clients.
+- **Web Dashboard**: Show playback, source health, quota usage, and queue progress.
+- **Desktop & Tray App**: Provide local controls without using a terminal.
+
+Later work can add more providers and account options:
+
+- **Apple Music & Deezer**: Read metadata from public catalog links.
 - **Multi-Account Concurrent Scrobbling**: Relay playback streams concurrently across multiple Last.fm or Libre.fm accounts.
 
 ---

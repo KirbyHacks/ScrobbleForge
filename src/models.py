@@ -15,6 +15,14 @@ class Track:
     provider_id: Optional[str] = None
 
     @property
+    def queue_identity(self) -> str:
+        """keep existing saved queue identifiers valid."""
+        if self.spotify_id:
+            return f"spotify:{self.spotify_id}"
+        prefix = f"{self.provider_id}::" if self.provider_id else ""
+        return f"{prefix}{self.artist.strip()}::{self.title.strip()}::{self.album.strip()}::{self.track_number}::{self.duration_ms}"
+
+    @property
     def duration_sec(self) -> int:
         """returns track duration in seconds."""
         return int(self.duration_ms / 1000)
@@ -52,7 +60,7 @@ class Track:
             artist=data.get("artist", "Unknown Artist"),
             album=data.get("album", ""),
             album_artist=data.get("album_artist", ""),
-            duration_ms=data.get("duration_ms", 180000),
+            duration_ms=data.get("duration_ms") if data.get("duration_ms") is not None else 180000,
             track_number=data.get("track_number", 1),
             spotify_id=data.get("spotify_id"),
             source_name=data.get("source_name", ""),

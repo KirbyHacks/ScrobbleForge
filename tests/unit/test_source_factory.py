@@ -74,7 +74,6 @@ class TestSourceFactory(unittest.TestCase):
             "spotify:album:4m2880jivSbbyEGAKfITCa",
             "spotify:track:4cOdK2wGLETKBW3PvgPWqT",
             "SPOTIFY:TRACK:4cOdK2wGLETKBW3PvgPWqT",
-            "spotify:artist:06HL4z0CvFAxyc27GXpf02",
         ]
         for uri in uris:
             with self.subTest(uri=uri):
@@ -94,6 +93,7 @@ class TestSourceFactory(unittest.TestCase):
 
     def test_invalid_and_unsupported_urls(self):
         invalid_sources = [
+            "spotify:artist:06HL4z0CvFAxyc27GXpf02",
             "https://soundcloud.com/artist/track",
             "https://music.apple.com/us/album/random-access-memories/617154241",
             "spotify:invalid",
